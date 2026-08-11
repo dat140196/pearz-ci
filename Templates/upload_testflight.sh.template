@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+EXPORT_DIR="$WORKSPACE/Builds/iOSExport"
+IPA="$(find "$EXPORT_DIR" -type f -name '*.ipa' | head -n 1 || true)"
+
+if [ -z "$IPA" ]; then
+  echo "ERROR: IPA not found"
+  exit 1
+fi
+
+echo "Uploading $IPA to App Store Connect..."
+xcrun iTMSTransporter -m upload -assetFile "$IPA" -v informational

@@ -1,0 +1,65 @@
+pipeline {
+    agent any
+
+    environment {
+        UNITY_PATH = '__UMP_UNITY_PATH__'
+        IOS_SCHEME = '__UMP_IOS_SCHEME__'
+    }
+
+    stages {
+        stage('Validate Branch') {
+            steps {
+                script {
+                    def allowed = ['release/android', 'release/ios-test', 'release/ios']
+                    if (!allowed.contains(env.BRANCH_NAME)) {
+                        error("Branch '${env.BRANCH_NAME}' is not a UMP release branch.")
+                    }
+                }
+            }
+        }
+
+        stage('Android') {
+            when { branch 'release/android' }
+            steps {
+                sh 'chmod +x Jenkins/build_android.sh && ./Jenkins/build_android.sh'
+            }
+        }
+
+        stage('iOS Device') {
+            when { branch 'release/ios-test' }
+            steps {
+                sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh'
+            }
+        }
+
+        stage('iOS TestFlight Build') {
+            when { branch 'release/ios' }
+            steps {
+                sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh'
+            }
+        }
+
+        stage('iOS Archive / Export') {
+            when { branch 'release/ios' }
+            steps {
+                sh 'chmod +x Jenkins/archive_ios.sh && ./Jenkins/archive_ios.sh'
+            }
+        }
+
+        stage('TestFlight Upload') {
+            when { branch 'release/ios' }
+            steps {
+                sh 'chmod +x Jenkins/upload_testflight.sh && ./Jenkins/upload_testflight.sh'
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts(
+                artifacts: 'Builds/**/*.apk,Builds/**/*.aab,Builds/**/*.ipa',
+                allowEmptyArchive: true
+            )
+        }
+    }
+}

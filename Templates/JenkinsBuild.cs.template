@@ -1,0 +1,72 @@
+using System;
+using System.IO;
+using System.Linq;
+using UnityEditor;
+using UnityEditor.Build.Reporting;
+
+public static class JenkinsBuild
+{
+    public static void BuildAndroid()
+    {
+        string output = "Builds/Android/Game.aab";
+        Prepare("Builds/Android");
+
+        var options = new BuildPlayerOptions
+        {
+            scenes = GetEnabledScenes(),
+            locationPathName = output,
+            target = BuildTarget.Android,
+            options = BuildOptions.None
+        };
+
+        Check(BuildPipeline.BuildPlayer(options));
+        UnityEngine.Debug.Log("[UMP] Android: " + output);
+    }
+
+    public static void BuildIOS()
+    {
+        string output = "Builds/iOS";
+        Prepare(output);
+
+        var options = new BuildPlayerOptions
+        {
+            scenes = GetEnabledScenes(),
+            locationPathName = output,
+            target = BuildTarget.iOS,
+            options = BuildOptions.None
+        };
+
+        Check(BuildPipeline.BuildPlayer(options));
+        UnityEngine.Debug.Log("[UMP] iOS Xcode project: " + output);
+    }
+
+    private static string[] GetEnabledScenes()
+    {
+        var scenes = EditorBuildSettings.scenes
+            .Where(s => s.enabled)
+            .Select(s => s.path)
+            .ToArray();
+
+        if (scenes.Length == 0)
+            throw new Exception("No enabled scenes found in Build Settings.");
+
+        foreach (var scene in scenes)
+            UnityEngine.Debug.Log("[UMP] Scene: " + scene);
+
+        return scenes;
+    }
+
+    private static void Prepare(string path)
+    {
+        if (Directory.Exists(path))
+            Directory.Delete(path, true);
+        Directory.CreateDirectory(path);
+    }
+
+    private static void Check(BuildReport report)
+    {
+        if (report == null || report.summary.result != BuildResult.Succeeded)
+            throw new Exception("Unity build failed: " +
+                (report == null ? "null report" : report.summary.result));
+    }
+}

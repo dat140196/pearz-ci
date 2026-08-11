@@ -1,0 +1,8 @@
+{
+  "name": "com.ump.mobile-pipeline",
+  "version": "1.0.0",
+  "displayName": "UMP Mobile Pipeline",
+  "description": "Unity Mobile Pipeline for Jenkins Android/iOS builds and TestFlight.",
+  "unity": "2021.3",
+  "author": { "name": "UMP" }
+}
