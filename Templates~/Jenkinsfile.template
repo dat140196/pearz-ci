@@ -30,8 +30,8 @@ pipeline {
                     }
 
                     echo "========================================"
-                    echo "PEARZ BUILD"
-                    echo "Branch: ${env.BRANCH_NAME}"
+                    echo "[PEARZ] BUILD"
+                    echo "[PEARZ] Branch: ${env.BRANCH_NAME}"
                     echo "========================================"
                 }
             }
@@ -162,7 +162,7 @@ pipeline {
         }
 
         // ====================================================
-        // GOOGLE DRIVE
+        // GOOGLE DRIVE UPLOAD
         // ====================================================
 
         stage('Drive Upload') {
@@ -173,17 +173,30 @@ pipeline {
 
                     def artifact = ''
 
+                    // ------------------------------------------------
                     // Android AAB
+                    // ------------------------------------------------
+
                     if (env.BRANCH_NAME == 'release/android') {
-                        artifact = 'Builds/Android/Game.aab'
+
+                        artifact =
+                            'Builds/Android/Game.aab'
                     }
 
+                    // ------------------------------------------------
                     // Android APK
+                    // ------------------------------------------------
+
                     if (env.BRANCH_NAME == 'release/android-test') {
-                        artifact = 'Builds/AndroidTest/Game.apk'
+
+                        artifact =
+                            'Builds/AndroidTest/Game.apk'
                     }
 
+                    // ------------------------------------------------
                     // iOS IPA
+                    // ------------------------------------------------
+
                     if (env.BRANCH_NAME == 'release/ios') {
 
                         artifact = sh(
@@ -197,45 +210,71 @@ pipeline {
                         ).trim()
                     }
 
+                    // ------------------------------------------------
+                    // Upload
+                    // ------------------------------------------------
+
                     if (artifact && fileExists(artifact)) {
 
                         echo "========================================"
-                        echo "[PEARZ] Google Drive Upload"
+                        echo "[PEARZ] GOOGLE DRIVE UPLOAD"
                         echo "[PEARZ] Artifact: ${artifact}"
                         echo "========================================"
 
-                        withCredentials([
+                        try {
 
-                            string(
-                                credentialsId: 'UMP_DRIVE_SERVICE_ACCOUNT_JSON',
-                                variable: 'UMP_DRIVE_SERVICE_ACCOUNT_JSON'
-                            ),
+                            withCredentials([
 
-                            string(
-                                credentialsId: 'UMP_DRIVE_FOLDER_ID',
-                                variable: 'UMP_DRIVE_FOLDER_ID'
-                            )
+                                string(
+                                    credentialsId:
+                                        'UMP_DRIVE_SERVICE_ACCOUNT_JSON',
+                                    variable:
+                                        'UMP_DRIVE_SERVICE_ACCOUNT_JSON'
+                                ),
 
-                        ]) {
+                                string(
+                                    credentialsId:
+                                        'UMP_DRIVE_FOLDER_ID',
+                                    variable:
+                                        'UMP_DRIVE_FOLDER_ID'
+                                )
 
-                            withEnv([
-                                "PEARZ_ARTIFACT=${artifact}"
                             ]) {
 
-                                sh '''
-                                    chmod +x Jenkins/upload_drive.sh
-                                    chmod +x Jenkins/upload_drive_impl.py
+                                withEnv([
+                                    "PEARZ_ARTIFACT=${artifact}"
+                                ]) {
 
-                                    ./Jenkins/upload_drive.sh \
-                                        "$PEARZ_ARTIFACT"
-                                '''
+                                    sh '''
+                                        chmod +x Jenkins/upload_drive.sh
+                                        chmod +x Jenkins/upload_drive_impl.py
+
+                                        ./Jenkins/upload_drive.sh \
+                                            "$PEARZ_ARTIFACT"
+                                    '''
+                                }
                             }
+
+                            echo "========================================"
+                            echo "[PEARZ] Google Drive upload finished."
+                            echo "========================================"
+
+                        } catch (Exception e) {
+
+                            echo "========================================"
+                            echo "[PEARZ] Google Drive upload FAILED."
+                            echo "[PEARZ] ${e.getMessage()}"
+                            echo "[PEARZ] Build will NOT fail because"
+                            echo "[PEARZ] Google Drive upload failed."
+                            echo "========================================"
                         }
 
                     } else {
 
-                        echo "[PEARZ] No artifact found for Google Drive upload."
-
+                        echo "========================================"
+                        echo "[PEARZ] No artifact found."
+                        echo "[PEARZ] Google Drive upload skipped."
+                        echo "========================================"
                     }
                 }
             }
@@ -243,7 +282,7 @@ pipeline {
     }
 
     // ========================================================
-    // POST ACTIONS
+    // POST
     // ========================================================
 
     post {
@@ -299,6 +338,7 @@ pipeline {
                     ).trim()
 
                     if (ipa) {
+
                         artifact =
                             "${env.WORKSPACE}/${ipa}"
                     }
@@ -308,41 +348,59 @@ pipeline {
                     currentBuild.currentResult ?: 'UNKNOWN'
 
                 echo "========================================"
-                echo "PEARZ BUILD RESULT"
-                echo "Status   : ${status}"
-                echo "Artifact : ${artifact}"
+                echo "[PEARZ] BUILD RESULT"
+                echo "[PEARZ] Status   : ${status}"
+                echo "[PEARZ] Artifact : ${artifact}"
                 echo "========================================"
 
                 // =================================================
                 // TELEGRAM
-                // Always notify SUCCESS / FAILURE
+                // Telegram failure NEVER fails Jenkins build
                 // =================================================
 
-                withCredentials([
+                try {
 
-                    string(
-                        credentialsId: 'UMP_TELEGRAM_BOT_TOKEN',
-                        variable: 'UMP_TELEGRAM_BOT_TOKEN'
-                    ),
+                    withCredentials([
 
-                    string(
-                        credentialsId: 'UMP_TELEGRAM_CHAT_ID',
-                        variable: 'UMP_TELEGRAM_CHAT_ID'
-                    )
+                        string(
+                            credentialsId:
+                                'UMP_TELEGRAM_BOT_TOKEN',
+                            variable:
+                                'UMP_TELEGRAM_BOT_TOKEN'
+                        ),
 
-                ]) {
+                        string(
+                            credentialsId:
+                                'UMP_TELEGRAM_CHAT_ID',
+                            variable:
+                                'UMP_TELEGRAM_CHAT_ID'
+                        )
 
-                    withEnv([
-                        "UMP_BUILD_STATUS=${status}",
-                        "UMP_ARTIFACT=${artifact}"
                     ]) {
 
-                        sh '''
-                            chmod +x Jenkins/notify_telegram.sh
+                        withEnv([
 
-                            ./Jenkins/notify_telegram.sh || true
-                        '''
+                            "UMP_BUILD_STATUS=${status}",
+
+                            "UMP_ARTIFACT=${artifact}"
+
+                        ]) {
+
+                            sh '''
+                                chmod +x Jenkins/notify_telegram.sh
+
+                                ./Jenkins/notify_telegram.sh || true
+                            '''
+                        }
                     }
+
+                } catch (Exception e) {
+
+                    echo "========================================"
+                    echo "[PEARZ] Telegram notification FAILED."
+                    echo "[PEARZ] ${e.getMessage()}"
+                    echo "[PEARZ] Build result will NOT be changed."
+                    echo "========================================"
                 }
 
                 // =================================================
