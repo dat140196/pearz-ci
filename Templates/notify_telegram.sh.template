@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+TOKEN="${UMP_TELEGRAM_BOT_TOKEN:-}"; CHAT_ID="${UMP_TELEGRAM_CHAT_ID:-}"
+if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then echo "[UMP] Telegram disabled: set UMP_TELEGRAM_BOT_TOKEN and UMP_TELEGRAM_CHAT_ID."; exit 0; fi
+STATUS="${UMP_BUILD_STATUS:-UNKNOWN}"; BRANCH="${BRANCH_NAME:-unknown}"; JOB="${JOB_NAME:-unknown}"; BUILD="${BUILD_NUMBER:-unknown}"; URL="${BUILD_URL:-}"; ARTIFACT="${UMP_ARTIFACT:-}"
+ICON="⚠️"; [ "$STATUS" = "SUCCESS" ] && ICON="✅"; [ "$STATUS" = "FAILURE" ] && ICON="❌"
+TEXT="${ICON} UMP Build ${STATUS}\nProject: ${JOB}\nBranch: ${BRANCH}\nBuild: #${BUILD}"
+[ -n "$URL" ] && TEXT="${TEXT}\nJenkins: ${URL}"
+curl -fsS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${TEXT}" >/dev/null || true
+if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
+  SIZE=$(stat -f%z "$ARTIFACT" 2>/dev/null || stat -c%s "$ARTIFACT" 2>/dev/null || echo 0)
+  if [ "$SIZE" -le 52428800 ]; then
+    curl -fsS -X POST "https://api.telegram.org/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${ARTIFACT}" -F "caption=${BRANCH} #${BUILD}" >/dev/null || true
+  else echo "[UMP] Telegram attachment skipped (>50 MB); status sent."; fi
+fi

@@ -1,5 +1,7 @@
 # UMP Mobile Pipeline
 Builds/Android/
+Builds/AndroidTest/
 Builds/iOS/
 Builds/iOSArchive/
 Builds/iOSExport/
+.ump_artifact_path

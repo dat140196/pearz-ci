@@ -1,14 +1,12 @@
-# UMP Project Checklist
-
+# UMP 1.1.0 Checklist
 - [ ] Install UMP by Git URL
 - [ ] Run Tools > UMP > Setup / Sync Jenkins Files
-- [ ] Configure Unity Build Settings scenes
-- [ ] Configure Android package ID
-- [ ] Configure iOS Bundle Identifier
-- [ ] Configure iOS Team/signing in Xcode
-- [ ] Test `release/android`
-- [ ] Test `release/ios-test`
-- [ ] Manually verify iOS Archive/Export
-- [ ] Manually verify TestFlight upload
-- [ ] Configure Jenkins Multibranch Pipeline
-- [ ] Configure Git webhook
+- [ ] Enable all required Build Settings scenes
+- [ ] Configure Jenkins Multibranch Pipeline + webhook
+- [ ] Configure Telegram token/chat ID
+- [ ] Create Drive folder and share it with service account
+- [ ] Configure Drive service-account JSON path + folder ID
+- [ ] Test release/android
+- [ ] Test release/android-test
+- [ ] Test release/ios-test
+- [ ] Test release/ios

@@ -1,65 +1,37 @@
 pipeline {
-    agent any
-
-    environment {
-        UNITY_PATH = '__UMP_UNITY_PATH__'
-        IOS_SCHEME = '__UMP_IOS_SCHEME__'
+  agent any
+  environment { UNITY_PATH='__UMP_UNITY_PATH__'; IOS_SCHEME='__UMP_IOS_SCHEME__' }
+  stages {
+    stage('Validate Branch') { steps { script { def a=['release/android','release/android-test','release/ios-test','release/ios']; if(!a.contains(env.BRANCH_NAME)) error("Unsupported UMP branch: ${env.BRANCH_NAME}") } } }
+    stage('Android AAB') { when { branch 'release/android' } steps { sh 'chmod +x Jenkins/build_android.sh && ./Jenkins/build_android.sh' } }
+    stage('Android APK') { when { branch 'release/android-test' } steps { sh 'chmod +x Jenkins/build_android.sh && ./Jenkins/build_android.sh' } }
+    stage('iOS Device') { when { branch 'release/ios-test' } steps { sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh' } }
+    stage('iOS TestFlight Build') { when { branch 'release/ios' } steps { sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh' } }
+    stage('iOS Archive / Export') { when { branch 'release/ios' } steps { sh 'chmod +x Jenkins/archive_ios.sh && ./Jenkins/archive_ios.sh' } }
+    stage('TestFlight Upload') { when { branch 'release/ios' } steps { sh 'chmod +x Jenkins/upload_testflight.sh && ./Jenkins/upload_testflight.sh' } }
+    stage('Drive Upload') {
+      steps {
+        script {
+          def f=''
+          if(env.BRANCH_NAME=='release/android') f='Builds/Android/Game.aab'
+          if(env.BRANCH_NAME=='release/android-test') f='Builds/AndroidTest/Game.apk'
+          if(env.BRANCH_NAME=='release/ios') f=sh(script:'find Builds/iOSExport -type f -name "*.ipa" | head -n 1 || true',returnStdout:true).trim()
+          if(f && fileExists(f)) { sh "chmod +x Jenkins/upload_drive.sh Jenkins/upload_drive_impl.py && ./Jenkins/upload_drive.sh '${f}'" }
+        }
+      }
     }
-
-    stages {
-        stage('Validate Branch') {
-            steps {
-                script {
-                    def allowed = ['release/android', 'release/ios-test', 'release/ios']
-                    if (!allowed.contains(env.BRANCH_NAME)) {
-                        error("Branch '${env.BRANCH_NAME}' is not a UMP release branch.")
-                    }
-                }
-            }
-        }
-
-        stage('Android') {
-            when { branch 'release/android' }
-            steps {
-                sh 'chmod +x Jenkins/build_android.sh && ./Jenkins/build_android.sh'
-            }
-        }
-
-        stage('iOS Device') {
-            when { branch 'release/ios-test' }
-            steps {
-                sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh'
-            }
-        }
-
-        stage('iOS TestFlight Build') {
-            when { branch 'release/ios' }
-            steps {
-                sh 'chmod +x Jenkins/build_ios.sh && ./Jenkins/build_ios.sh'
-            }
-        }
-
-        stage('iOS Archive / Export') {
-            when { branch 'release/ios' }
-            steps {
-                sh 'chmod +x Jenkins/archive_ios.sh && ./Jenkins/archive_ios.sh'
-            }
-        }
-
-        stage('TestFlight Upload') {
-            when { branch 'release/ios' }
-            steps {
-                sh 'chmod +x Jenkins/upload_testflight.sh && ./Jenkins/upload_testflight.sh'
-            }
-        }
+  }
+  post {
+    always {
+      script {
+        def f=''
+        if(env.BRANCH_NAME=='release/android') f="${env.WORKSPACE}/Builds/Android/Game.aab"
+        if(env.BRANCH_NAME=='release/android-test') f="${env.WORKSPACE}/Builds/AndroidTest/Game.apk"
+        if(env.BRANCH_NAME=='release/ios') f=sh(script:'find Builds/iOSExport -type f -name "*.ipa" | head -n 1 || true',returnStdout:true).trim()
+        def st=currentBuild.currentResult
+        sh "chmod +x Jenkins/notify_telegram.sh; UMP_BUILD_STATUS='${st}' UMP_ARTIFACT='${f}' ./Jenkins/notify_telegram.sh || true"
+      }
+      archiveArtifacts artifacts:'Builds/**/*.apk,Builds/**/*.aab,Builds/**/*.ipa',allowEmptyArchive:true
     }
-
-    post {
-        always {
-            archiveArtifacts(
-                artifacts: 'Builds/**/*.apk,Builds/**/*.aab,Builds/**/*.ipa',
-                allowEmptyArchive: true
-            )
-        }
-    }
+  }
 }

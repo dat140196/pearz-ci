@@ -1,5 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 UNITY_PATH="${UNITY_PATH:-__UMP_UNITY_PATH__}"
-
-"$UNITY_PATH" -batchmode -quit   -projectPath "$WORKSPACE"   -executeMethod JenkinsBuild.BuildAndroid   -buildTarget Android   -logFile -
+if [ "${BRANCH_NAME:-}" = "release/android-test" ]; then
+  "$UNITY_PATH" -batchmode -quit -projectPath "$WORKSPACE" -executeMethod JenkinsBuild.BuildAndroidApk -buildTarget Android -logFile -
+else
+  "$UNITY_PATH" -batchmode -quit -projectPath "$WORKSPACE" -executeMethod JenkinsBuild.BuildAndroidAab -buildTarget Android -logFile -
+fi

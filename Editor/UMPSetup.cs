@@ -26,6 +26,9 @@ namespace UMP.Editor
             Copy(projectRoot, packageRoot, "Templates/build_ios.sh.template", "Jenkins/build_ios.sh", overwrite, unityPath, iosScheme);
             Copy(projectRoot, packageRoot, "Templates/archive_ios.sh.template", "Jenkins/archive_ios.sh", overwrite, unityPath, iosScheme);
             Copy(projectRoot, packageRoot, "Templates/upload_testflight.sh.template", "Jenkins/upload_testflight.sh", overwrite, unityPath, iosScheme);
+            Copy(projectRoot, packageRoot, "Templates/upload_drive.sh.template", "Jenkins/upload_drive.sh", overwrite, unityPath, iosScheme);
+            Copy(projectRoot, packageRoot, "Templates/upload_drive_impl.py", "Jenkins/upload_drive_impl.py", overwrite, unityPath, iosScheme);
+            Copy(projectRoot, packageRoot, "Templates/notify_telegram.sh.template", "Jenkins/notify_telegram.sh", overwrite, unityPath, iosScheme);
             Copy(projectRoot, packageRoot, "Templates/ExportOptions.plist.template", "Jenkins/ExportOptions.plist", overwrite, unityPath, iosScheme);
 
             AppendGitignore(projectRoot, packageRoot);

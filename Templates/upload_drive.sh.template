@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+if [ -z "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ] || [ -z "${UMP_DRIVE_FOLDER_ID:-}" ]; then
+  echo "[UMP] Google Drive disabled: set UMP_DRIVE_SERVICE_ACCOUNT_JSON and UMP_DRIVE_FOLDER_ID."
+  exit 0
+fi
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+python3 "$SCRIPT_DIR/upload_drive_impl.py" "$1"
