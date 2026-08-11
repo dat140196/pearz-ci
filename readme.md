@@ -1,6 +1,4 @@
-# UMP Unity Mobile Pipeline 1.1.1
-
-This release fixes the Unity Editor compilation issue in 1.1.0.
+# Pearz Unity Build Pipeline
 
 Install using Unity Package Manager -> Add package from Git URL.
 
