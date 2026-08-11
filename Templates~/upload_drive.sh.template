@@ -1,8 +1,38 @@
 #!/bin/bash
+
 set -euo pipefail
-if [ -z "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ] || [ -z "${UMP_DRIVE_FOLDER_ID:-}" ]; then
-  echo "[UMP] Google Drive disabled: set UMP_DRIVE_SERVICE_ACCOUNT_JSON and UMP_DRIVE_FOLDER_ID."
-  exit 0
+
+echo "========================================"
+echo "[PEARZ] Google Drive Upload"
+echo "========================================"
+
+if [ "$#" -lt 1 ]; then
+    echo "[PEARZ] ERROR: Missing artifact."
+    exit 1
 fi
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-python3 "$SCRIPT_DIR/upload_drive_impl.py" "$1"
+
+ARTIFACT="$1"
+
+if [ ! -f "$ARTIFACT" ]; then
+    echo "[PEARZ] ERROR: Artifact not found:"
+    echo "$ARTIFACT"
+    exit 1
+fi
+
+if [ -z "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ]; then
+    echo "[PEARZ] ERROR: UMP_DRIVE_SERVICE_ACCOUNT_JSON is empty."
+    exit 1
+fi
+
+if [ -z "${UMP_DRIVE_FOLDER_ID:-}" ]; then
+    echo "[PEARZ] ERROR: UMP_DRIVE_FOLDER_ID is empty."
+    exit 1
+fi
+
+echo "[PEARZ] Artifact: $ARTIFACT"
+
+python3 Jenkins/upload_drive_impl.py "$ARTIFACT"
+
+echo "========================================"
+echo "[PEARZ] Google Drive upload completed."
+echo "========================================"
