@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.1.2
+# UMP Unity Mobile Pipeline 1.1.1
 
 This release fixes the Unity Editor compilation issue in 1.1.0.
 
