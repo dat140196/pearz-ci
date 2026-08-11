@@ -1,10 +1,10 @@
 {
   "name": "com.ump.pearz-build-pipeline",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "displayName": "Pearz Build Pipeline",
   "description": "Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google Drive artifacts and Telegram notifications.",
   "unity": "2021.3",
   "author": {
-    "name": "dat1401@gmail.com"
+    "name": "dattq1401@gmail.com"
   }
 }

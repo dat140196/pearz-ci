@@ -23,25 +23,25 @@ namespace UMP
                 return;
             }
 
-            Copy(projectRoot, packageRoot, "Templates/Jenkinsfile.template",
+            Copy(projectRoot, packageRoot, "Templates~/Jenkinsfile.template",
                 "Jenkinsfile", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/JenkinsBuild.cs.template",
+            Copy(projectRoot, packageRoot, "Templates~/JenkinsBuild.cs.template",
                 "Assets/Editor/JenkinsBuild.cs", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/build_android.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/build_android.sh.template",
                 "Jenkins/build_android.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/build_ios.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/build_ios.sh.template",
                 "Jenkins/build_ios.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/archive_ios.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/archive_ios.sh.template",
                 "Jenkins/archive_ios.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/upload_testflight.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/upload_testflight.sh.template",
                 "Jenkins/upload_testflight.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/upload_drive.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/upload_drive.sh.template",
                 "Jenkins/upload_drive.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/upload_drive_impl.py",
+            Copy(projectRoot, packageRoot, "Templates~/upload_drive_impl.py",
                 "Jenkins/upload_drive_impl.py", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/notify_telegram.sh.template",
+            Copy(projectRoot, packageRoot, "Templates~/notify_telegram.sh.template",
                 "Jenkins/notify_telegram.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates/ExportOptions.plist.template",
+            Copy(projectRoot, packageRoot, "Templates~/ExportOptions.plist.template",
                 "Jenkins/ExportOptions.plist", overwrite, unityPath, iosScheme);
 
             AppendGitignore(projectRoot, packageRoot);
@@ -137,7 +137,7 @@ namespace UMP
                 return;
 
             string template = File.ReadAllText(
-                Path.Combine(packageRoot, "Templates/UMP.gitignore.template"));
+                Path.Combine(packageRoot, "Templates~/UMP.gitignore.template"));
 
             File.AppendAllText(
                 destination,
