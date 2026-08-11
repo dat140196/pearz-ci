@@ -8,6 +8,10 @@ pipeline {
 
     stages {
 
+        // ====================================================
+        // VALIDATE BRANCH
+        // ====================================================
+
         stage('Validate Branch') {
             steps {
                 script {
@@ -138,7 +142,7 @@ pipeline {
         }
 
         // ====================================================
-        // TESTFLIGHT
+        // TESTFLIGHT UPLOAD
         // ====================================================
 
         stage('TestFlight Upload') {
@@ -169,54 +173,68 @@ pipeline {
 
                     def artifact = ''
 
-                    if (
-                        env.BRANCH_NAME ==
-                        'release/android'
-                    ) {
-                        artifact =
-                            'Builds/Android/Game.aab'
+                    // Android AAB
+                    if (env.BRANCH_NAME == 'release/android') {
+                        artifact = 'Builds/Android/Game.aab'
                     }
 
-                    if (
-                        env.BRANCH_NAME ==
-                        'release/android-test'
-                    ) {
-                        artifact =
-                            'Builds/AndroidTest/Game.apk'
+                    // Android APK
+                    if (env.BRANCH_NAME == 'release/android-test') {
+                        artifact = 'Builds/AndroidTest/Game.apk'
                     }
 
-                    if (
-                        env.BRANCH_NAME ==
-                        'release/ios'
-                    ) {
+                    // iOS IPA
+                    if (env.BRANCH_NAME == 'release/ios') {
+
                         artifact = sh(
-                            script:
-                                'find Builds/iOSExport ' +
-                                '-type f -name "*.ipa" ' +
-                                '| head -n 1 || true',
+                            script: '''
+                                find Builds/iOSExport \
+                                -type f \
+                                -name "*.ipa" \
+                                | head -n 1 || true
+                            ''',
                             returnStdout: true
                         ).trim()
                     }
 
-                    if (
-                        artifact &&
-                        fileExists(artifact)
-                    ) {
+                    if (artifact && fileExists(artifact)) {
 
                         echo "========================================"
-                        echo "Uploading to Google Drive"
-                        echo "Artifact: ${artifact}"
+                        echo "[PEARZ] Google Drive Upload"
+                        echo "[PEARZ] Artifact: ${artifact}"
                         echo "========================================"
 
-                        sh """
-                            chmod +x Jenkins/upload_drive.sh
-                            chmod +x Jenkins/upload_drive_impl.py
-                            ./Jenkins/upload_drive.sh '${artifact}'
-                        """
+                        withCredentials([
+
+                            string(
+                                credentialsId: 'UMP_DRIVE_SERVICE_ACCOUNT_JSON',
+                                variable: 'UMP_DRIVE_SERVICE_ACCOUNT_JSON'
+                            ),
+
+                            string(
+                                credentialsId: 'UMP_DRIVE_FOLDER_ID',
+                                variable: 'UMP_DRIVE_FOLDER_ID'
+                            )
+
+                        ]) {
+
+                            withEnv([
+                                "PEARZ_ARTIFACT=${artifact}"
+                            ]) {
+
+                                sh '''
+                                    chmod +x Jenkins/upload_drive.sh
+                                    chmod +x Jenkins/upload_drive_impl.py
+
+                                    ./Jenkins/upload_drive.sh \
+                                        "$PEARZ_ARTIFACT"
+                                '''
+                            }
+                        }
 
                     } else {
 
-                        echo "No artifact found for Drive upload."
+                        echo "[PEARZ] No artifact found for Google Drive upload."
 
                     }
                 }
@@ -225,8 +243,7 @@ pipeline {
     }
 
     // ========================================================
-    // POST
-    // Telegram + Jenkins Artifact
+    // POST ACTIONS
     // ========================================================
 
     post {
@@ -237,32 +254,47 @@ pipeline {
 
                 def artifact = ''
 
-                if (
-                    env.BRANCH_NAME ==
-                    'release/android'
-                ) {
-                    artifact =
+                // ------------------------------------------------
+                // Android AAB
+                // ------------------------------------------------
+
+                if (env.BRANCH_NAME == 'release/android') {
+
+                    def path =
                         "${env.WORKSPACE}/Builds/Android/Game.aab"
+
+                    if (fileExists(path)) {
+                        artifact = path
+                    }
                 }
 
-                if (
-                    env.BRANCH_NAME ==
-                    'release/android-test'
-                ) {
-                    artifact =
+                // ------------------------------------------------
+                // Android APK
+                // ------------------------------------------------
+
+                if (env.BRANCH_NAME == 'release/android-test') {
+
+                    def path =
                         "${env.WORKSPACE}/Builds/AndroidTest/Game.apk"
+
+                    if (fileExists(path)) {
+                        artifact = path
+                    }
                 }
 
-                if (
-                    env.BRANCH_NAME ==
-                    'release/ios'
-                ) {
+                // ------------------------------------------------
+                // iOS IPA
+                // ------------------------------------------------
+
+                if (env.BRANCH_NAME == 'release/ios') {
 
                     def ipa = sh(
-                        script:
-                            'find Builds/iOSExport ' +
-                            '-type f -name "*.ipa" ' +
-                            '| head -n 1 || true',
+                        script: '''
+                            find Builds/iOSExport \
+                            -type f \
+                            -name "*.ipa" \
+                            | head -n 1 || true
+                        ''',
                         returnStdout: true
                     ).trim()
 
@@ -281,22 +313,50 @@ pipeline {
                 echo "Artifact : ${artifact}"
                 echo "========================================"
 
-                sh """
-                    chmod +x Jenkins/notify_telegram.sh
+                // =================================================
+                // TELEGRAM
+                // Always notify SUCCESS / FAILURE
+                // =================================================
 
-                    UMP_BUILD_STATUS='${status}' \
-                    UMP_ARTIFACT='${artifact}' \
-                    ./Jenkins/notify_telegram.sh || true
-                """
+                withCredentials([
+
+                    string(
+                        credentialsId: 'UMP_TELEGRAM_BOT_TOKEN',
+                        variable: 'UMP_TELEGRAM_BOT_TOKEN'
+                    ),
+
+                    string(
+                        credentialsId: 'UMP_TELEGRAM_CHAT_ID',
+                        variable: 'UMP_TELEGRAM_CHAT_ID'
+                    )
+
+                ]) {
+
+                    withEnv([
+                        "UMP_BUILD_STATUS=${status}",
+                        "UMP_ARTIFACT=${artifact}"
+                    ]) {
+
+                        sh '''
+                            chmod +x Jenkins/notify_telegram.sh
+
+                            ./Jenkins/notify_telegram.sh || true
+                        '''
+                    }
+                }
+
+                // =================================================
+                // JENKINS ARTIFACT ARCHIVE
+                // =================================================
+
+                archiveArtifacts(
+                    artifacts:
+                        'Builds/**/*.apk,' +
+                        'Builds/**/*.aab,' +
+                        'Builds/**/*.ipa',
+                    allowEmptyArchive: true
+                )
             }
-
-            archiveArtifacts(
-                artifacts:
-                    'Builds/**/*.apk,' +
-                    'Builds/**/*.aab,' +
-                    'Builds/**/*.ipa',
-                allowEmptyArchive: true
-            )
         }
     }
 }
