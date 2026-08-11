@@ -3,7 +3,6 @@ pipeline {
     agent any
 
     environment {
-        UNITY_PATH = '**UMP_UNITY_PATH**'
         IOS_SCHEME = '**UMP_IOS_SCHEME**'
     }
 
@@ -12,6 +11,7 @@ pipeline {
         stage('Validate Branch') {
             steps {
                 script {
+
                     def allowedBranches = [
                         'release/android',
                         'release/android-test',
@@ -20,15 +20,26 @@ pipeline {
                     ]
 
                     if (!allowedBranches.contains(env.BRANCH_NAME)) {
-                        error("Unsupported UMP branch: ${env.BRANCH_NAME}")
+                        error(
+                            "Unsupported PEARZ branch: ${env.BRANCH_NAME}"
+                        )
                     }
 
-                    echo "Building branch: ${env.BRANCH_NAME}"
+                    echo "========================================"
+                    echo "PEARZ BUILD"
+                    echo "Branch: ${env.BRANCH_NAME}"
+                    echo "========================================"
                 }
             }
         }
 
+        // ====================================================
+        // ANDROID AAB
+        // release/android
+        // ====================================================
+
         stage('Android AAB') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/android'
@@ -43,7 +54,13 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // ANDROID APK
+        // release/android-test
+        // ====================================================
+
         stage('Android APK') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/android-test'
@@ -58,7 +75,13 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // IOS DEVICE
+        // release/ios-test
+        // ====================================================
+
         stage('iOS Device') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/ios-test'
@@ -73,7 +96,13 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // IOS BUILD
+        // release/ios
+        // ====================================================
+
         stage('iOS TestFlight Build') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/ios'
@@ -88,7 +117,12 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // IOS ARCHIVE / EXPORT
+        // ====================================================
+
         stage('iOS Archive / Export') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/ios'
@@ -103,7 +137,12 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // TESTFLIGHT
+        // ====================================================
+
         stage('TestFlight Upload') {
+
             when {
                 expression {
                     env.BRANCH_NAME == 'release/ios'
@@ -118,31 +157,56 @@ pipeline {
             }
         }
 
+        // ====================================================
+        // GOOGLE DRIVE
+        // ====================================================
+
         stage('Drive Upload') {
+
             steps {
+
                 script {
 
                     def artifact = ''
 
-                    if (env.BRANCH_NAME == 'release/android') {
-                        artifact = 'Builds/Android/Game.aab'
+                    if (
+                        env.BRANCH_NAME ==
+                        'release/android'
+                    ) {
+                        artifact =
+                            'Builds/Android/Game.aab'
                     }
 
-                    if (env.BRANCH_NAME == 'release/android-test') {
-                        artifact = 'Builds/AndroidTest/Game.apk'
+                    if (
+                        env.BRANCH_NAME ==
+                        'release/android-test'
+                    ) {
+                        artifact =
+                            'Builds/AndroidTest/Game.apk'
                     }
 
-                    if (env.BRANCH_NAME == 'release/ios') {
+                    if (
+                        env.BRANCH_NAME ==
+                        'release/ios'
+                    ) {
                         artifact = sh(
-                            script: 'find Builds/iOSExport -type f -name "*.ipa" | head -n 1 || true',
+                            script:
+                                'find Builds/iOSExport ' +
+                                '-type f -name "*.ipa" ' +
+                                '| head -n 1 || true',
                             returnStdout: true
                         ).trim()
                     }
 
-                    if (artifact && fileExists(artifact)) {
+                    if (
+                        artifact &&
+                        fileExists(artifact)
+                    ) {
 
-                        echo "Uploading artifact to Google Drive:"
-                        echo artifact
+                        echo "========================================"
+                        echo "Uploading to Google Drive"
+                        echo "Artifact: ${artifact}"
+                        echo "========================================"
 
                         sh """
                             chmod +x Jenkins/upload_drive.sh
@@ -153,11 +217,17 @@ pipeline {
                     } else {
 
                         echo "No artifact found for Drive upload."
+
                     }
                 }
             }
         }
     }
+
+    // ========================================================
+    // POST
+    // Telegram + Jenkins Artifact
+    // ========================================================
 
     post {
 
@@ -167,29 +237,49 @@ pipeline {
 
                 def artifact = ''
 
-                if (env.BRANCH_NAME == 'release/android') {
-                    artifact = "${env.WORKSPACE}/Builds/Android/Game.aab"
+                if (
+                    env.BRANCH_NAME ==
+                    'release/android'
+                ) {
+                    artifact =
+                        "${env.WORKSPACE}/Builds/Android/Game.aab"
                 }
 
-                if (env.BRANCH_NAME == 'release/android-test') {
-                    artifact = "${env.WORKSPACE}/Builds/AndroidTest/Game.apk"
+                if (
+                    env.BRANCH_NAME ==
+                    'release/android-test'
+                ) {
+                    artifact =
+                        "${env.WORKSPACE}/Builds/AndroidTest/Game.apk"
                 }
 
-                if (env.BRANCH_NAME == 'release/ios') {
-                    artifact = sh(
-                        script: 'find Builds/iOSExport -type f -name "*.ipa" | head -n 1 || true',
+                if (
+                    env.BRANCH_NAME ==
+                    'release/ios'
+                ) {
+
+                    def ipa = sh(
+                        script:
+                            'find Builds/iOSExport ' +
+                            '-type f -name "*.ipa" ' +
+                            '| head -n 1 || true',
                         returnStdout: true
                     ).trim()
 
-                    if (artifact) {
-                        artifact = "${env.WORKSPACE}/${artifact}"
+                    if (ipa) {
+                        artifact =
+                            "${env.WORKSPACE}/${ipa}"
                     }
                 }
 
-                def status = currentBuild.currentResult
+                def status =
+                    currentBuild.currentResult ?: 'UNKNOWN'
 
-                echo "Build status: ${status}"
-                echo "Artifact: ${artifact}"
+                echo "========================================"
+                echo "PEARZ BUILD RESULT"
+                echo "Status   : ${status}"
+                echo "Artifact : ${artifact}"
+                echo "========================================"
 
                 sh """
                     chmod +x Jenkins/notify_telegram.sh
@@ -201,7 +291,10 @@ pipeline {
             }
 
             archiveArtifacts(
-                artifacts: 'Builds/**/*.apk,Builds/**/*.aab,Builds/**/*.ipa',
+                artifacts:
+                    'Builds/**/*.apk,' +
+                    'Builds/**/*.aab,' +
+                    'Builds/**/*.ipa',
                 allowEmptyArchive: true
             )
         }
