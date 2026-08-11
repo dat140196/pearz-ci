@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.0.0
+# UMP Jenkins Setup 1.1.0
 
 Branches:
 - release/android -> AAB

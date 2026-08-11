@@ -1,28 +1,21 @@
-# UMP - Unity Mobile Pipeline
+# UMP Unity Mobile Pipeline 1.1.1
 
-Install this package from Unity Package Manager using a Git URL.
+This release fixes the Unity Editor compilation issue in 1.1.0.
 
-After importing, run:
+Install using Unity Package Manager -> Add package from Git URL.
 
-**Tools > UMP > Setup / Sync Jenkins Files**
+After import, use:
 
-It creates the Jenkins files in the Unity project root:
-
-- Jenkinsfile
-- Assets/Editor/JenkinsBuild.cs
-- Jenkins/build_android.sh
-- Jenkins/build_ios.sh
-- Jenkins/archive_ios.sh
-- Jenkins/upload_testflight.sh
-- Jenkins/ExportOptions.plist
-- .gitignore UMP section
+Tools > UMP > Setup / Sync Jenkins Files
 
 Branches:
+- release/android -> AAB
+- release/android-test -> APK
+- release/ios-test -> iOS Xcode project
+- release/ios -> Archive/Export/TestFlight
 
-- `release/android` -> Android AAB
-- `release/ios-test` -> iOS Xcode project for device testing
-- `release/ios` -> iOS archive/export + TestFlight upload
-
-UMP reads all enabled scenes from Unity Build Settings.
-
-For TestFlight, configure Apple Developer signing on the Jenkins Mac/Xcode first. Do not store Apple passwords in Git.
+Jenkins credentials:
+- ump-drive-service-account-json (Secret file)
+- ump-drive-folder-id (Secret text)
+- ump-telegram-bot-token (Secret text)
+- ump-telegram-chat-id (Secret text)

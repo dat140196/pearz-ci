@@ -1,8 +1,10 @@
 {
-  "name": "com.ump.mobile-pipeline",
-  "version": "1.1.0",
-  "displayName": "UMP Mobile Pipeline",
-  "description": "Unity Mobile Pipeline for Jenkins Android/iOS builds and TestFlight, Google Drive artifacts and Telegram notifications.",
-  "unity": "2021.3",
-  "author": { "name": "UMP" }
+  "name": "com.ump.pearz-build-pipeline",
+  "version": "1.0.1",
+  "displayName": "Pearz Build Pipeline",
+  "description": "Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google Drive artifacts and Telegram notifications.",
+  "unity": "6000.3.14f1",
+  "author": {
+    "name": "Dat"
+  }
 }
