@@ -45,16 +45,22 @@ Jenkins built can be opened in Finder, Unity or Xcode while a failure is
 being looked at:
 
 ```
-~/Desktop/PearzBuilds/<job name>/<branch>
+~/Desktop/PearzBuilds/MeowPuzzle/release_android
 ```
 
 `Builds/` and the generated Xcode project are inside that folder as usual.
 
-`~` is the home of the **user Jenkins runs as**. Started with
-`brew services start jenkins-lts` that is your own account and the folder
-shows up on your Desktop right away. Installed as the system service, it
-is the `jenkins` user instead, whose Desktop no Finder window ever shows -
-point the build somewhere visible with a global environment variable
+The folder is the job name with every unsafe character replaced. The `%2F`
+Jenkins puts in `JOB_NAME` for a branch **must** go: Unity 6 dies halfway
+through an Android build on a path containing `%`, with
+`llvm-objcopy: error: '<path>': No such file or directory` for a file whose
+folder is right there.
+
+`~` is the home of the **user Jenkins runs as**, guessed from the parent of
+`JENKINS_HOME` because the real `$HOME` is not readable at the point
+Jenkins picks the workspace. With the usual `~/.jenkins` that is correct.
+When it is not - Jenkins installed as the system service, a `JENKINS_HOME`
+somewhere else, a remote agent - set a global environment variable
 (**Manage Jenkins > System > Global properties > Environment variables**):
 
 ```

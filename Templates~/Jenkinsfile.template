@@ -87,24 +87,68 @@ def buildAndroid() {
     }
 }
 
+// ============================================================
+// CHECKOUT LOCATION
+//
+// The project is checked out on the Desktop of the build
+// machine instead of the hidden Jenkins workspace, so the exact
+// tree that was built can be opened in Finder, Unity or Xcode
+// while a failure is being looked at.
+//
+// Two rules this path has to obey:
+//
+//   1. No "%" in it. Jenkins encodes the "/" of a branch as
+//      "%2F" inside JOB_NAME, and Unity 6 fails halfway through
+//      an Android build on such a path - llvm-objcopy reports
+//      "No such file or directory" for a file whose folder is
+//      right there. The job name is sanitised below.
+//
+//   2. It is resolved on the controller, before a node exists,
+//      so $HOME of the build user is not readable here. The
+//      parent of JENKINS_HOME is used instead, which is the
+//      home of the user Jenkins runs as in the normal
+//      "~/.jenkins" setup.
+//
+// Set the global environment variable UMP_WORKSPACE_ROOT
+// (Manage Jenkins > System) to put the checkout anywhere else.
+// ============================================================
+
+// Plain string work, no pipeline steps: @NonCPS keeps it callable
+// from the agent directive, which is not a CPS context.
+@NonCPS
+def umpWorkspace() {
+
+    def root = env.UMP_WORKSPACE_ROOT
+
+    if (!root) {
+
+        def home = env.HOME
+
+        // "/Users/pearz/.jenkins" -> "/Users/pearz"
+        if (!home && env.JENKINS_HOME) {
+            home = env.JENKINS_HOME.replaceAll('/[^/]+/?$', '')
+        }
+
+        root = (home ?: '/tmp') + '/Desktop/PearzBuilds'
+    }
+
+    // "MeowPuzzle/release%2Fandroid" -> "MeowPuzzle/release_android"
+    def job = (env.JOB_NAME ?: 'ump')
+        .replaceAll('%2F', '_')
+        .replaceAll('[^A-Za-z0-9._/-]', '_')
+
+    return root + '/' + job
+}
+
 pipeline {
 
-    // The project is checked out on the Desktop of the build machine
-    // instead of the hidden Jenkins workspace, so the exact tree that
-    // was built can be opened in Finder, Unity or Xcode while a
-    // failure is being looked at.
-    //
-    // "~" is the home of the user Jenkins runs as - not necessarily
-    // the user logged in to the Mac. Set the global environment
-    // variable UMP_WORKSPACE_ROOT (Manage Jenkins > System) to put
-    // the checkout somewhere else.
     agent {
 
         node {
 
             label ''
 
-            customWorkspace "${env.UMP_WORKSPACE_ROOT ?: (env.HOME ?: '/Users/Shared') + '/Desktop/PearzBuilds'}/${env.JOB_NAME}"
+            customWorkspace "${umpWorkspace()}"
         }
     }
 
