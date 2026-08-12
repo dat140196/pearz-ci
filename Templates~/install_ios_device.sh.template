@@ -255,9 +255,35 @@ INNER
 # leftover certificate in the keychain proves nothing.
 detect_account_teams() {
 
-    defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
+    local teams=""
+
+    # Where Xcode keeps this moves between versions, so read the
+    # preference and the provisioning profiles it downloaded.
+    teams="$(defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
         | sed -n 's/.*teamID[[:space:]]*=[[:space:]]*"\{0,1\}\([A-Z0-9]\{10\}\)"\{0,1\}.*/\1/p' \
-        | sort -u
+        || true)"
+
+    local dir
+    local profile
+    local team
+
+    for dir in "${PROFILE_DIRS[@]}"; do
+
+        [ -d "$dir" ] || continue
+
+        for profile in "$dir"/*.mobileprovision; do
+
+            [ -f "$profile" ] || continue
+
+            team="$(security cms -D -i "$profile" 2>/dev/null \
+                | plutil -extract TeamIdentifier.0 raw - 2>/dev/null || true)"
+
+            [ -n "$team" ] && teams="$teams
+$team"
+        done
+    done
+
+    echo "$teams" | grep -E '^[A-Z0-9]{10}$' | sort -u || true
 }
 
 TEAM="${UMP_IOS_TEAM_ID:-}"
@@ -440,6 +466,55 @@ if [ "$USING_API_KEY" -eq 0 ] && \
 
     echo "[PEARZ] Note: no signed-in Xcode account found."
     echo "[PEARZ] Building anyway - Xcode may still know better."
+fi
+
+# ------------------------------------------------------------
+# Strip capabilities a test build cannot sign
+#
+# A free Personal Team is not allowed to use In-App Purchase,
+# push notifications and friends, so provisioning fails with
+# "No profiles for ... were found". The generated Xcode project
+# lives in Builds/ and is rebuilt every time, so editing it here
+# changes nothing in the repo - the game code is untouched.
+#
+# UMP_IOS_STRIP_CAPABILITIES="" keeps everything (paid team).
+# ------------------------------------------------------------
+
+STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
+
+if [ -n "$STRIP" ]; then
+
+    PBXPROJ="$PROJECT/project.pbxproj"
+
+    for capability in $STRIP; do
+
+        if grep -q "$capability" "$PBXPROJ" 2>/dev/null; then
+
+            perl -0pi -e \
+                "s/^[ \t]*\Q$capability\E[ \t]*=[ \t]*\{[^}]*\};[ \t]*\n//mg" \
+                "$PBXPROJ"
+
+            echo "[PEARZ] Removed capability: $capability"
+        fi
+    done
+
+    # The matching entitlements, when Unity wrote any.
+    for entitlements in "$(dirname "$PROJECT")"/*.entitlements; do
+
+        [ -f "$entitlements" ] || continue
+
+        for key in \
+            com.apple.developer.in-app-payments \
+            aps-environment; do
+
+            /usr/libexec/PlistBuddy -c "Print :$key" "$entitlements" \
+                >/dev/null 2>&1 || continue
+
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$entitlements" \
+                >/dev/null 2>&1 &&
+                echo "[PEARZ] Removed entitlement: $key"
+        done
+    done
 fi
 
 rm -rf "$DERIVED"

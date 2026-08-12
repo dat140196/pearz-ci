@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.12.4
+# UMP Jenkins Setup 1.13.0
 
 ## Install / sync
 
@@ -428,11 +428,31 @@ certificate that step 3 picks up. Limits: the app stops running after
 Center. Good enough to hand a build to a tester, not for TestFlight
 (`release/ios` needs a paid account).
 
+### Capabilities a free team cannot sign
+
+A free Personal Team is not allowed to use In-App Purchase, so a project
+with Unity IAP fails provisioning with `No profiles for '<bundle id>' were
+found` - the same message as a missing account. Before building, the stage
+removes `com.apple.InAppPurchase` from the **generated** Xcode project in
+`Builds/`, which is regenerated on every build: the repo and the game code
+are untouched, and the APK/AAB and TestFlight paths keep IAP.
+
+`UMP_IOS_STRIP_CAPABILITIES` controls the list (space separated). Set it
+empty to keep everything once the Mac uses a paid team:
+
+```
+UMP_IOS_STRIP_CAPABILITIES=
+```
+
+`aps-environment` and `com.apple.developer.in-app-payments` are dropped
+from the generated `.entitlements` too, for the same reason.
+
 Optional Jenkins env vars:
 
 | Variable | Meaning |
 | --- | --- |
 | `UMP_IOS_TEAM_ID` | override the Player Settings team for every project |
+| `UMP_IOS_STRIP_CAPABILITIES` | capabilities removed before signing |
 | `UMP_IOS_DEVICE_UDID` | pick one device when several are attached |
 | `UMP_IOS_DEVICE_NAME` | ... or pick it by name |
 | `UMP_IOS_CONFIGURATION` | `Release` (default) or `Debug` |
