@@ -17,6 +17,7 @@ set -euo pipefail
 
 echo "========================================"
 echo "[PEARZ] iOS install on device"
+echo "[PEARZ] UMP @UMP_VERSION@"
 echo "========================================"
 
 if [ -z "${WORKSPACE:-}" ]; then
@@ -482,6 +483,41 @@ fi
 
 STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
 
+PROJECT_DIR="$(dirname "$PROJECT")"
+
+# Every entitlements file this build could sign with: the one the
+# target points at (a path relative to the project) plus anything
+# Unity left in the exported project. Which of the two carries a
+# capability changed between Unity versions, so both are cleaned.
+list_entitlements() {
+
+    local declared
+    local file
+
+    declared="$(echo "$SETTINGS" \
+        | awk -F' = ' '/ CODE_SIGN_ENTITLEMENTS = / {print $2}' \
+        | tr -d '\r' || true)"
+
+    while IFS= read -r file; do
+
+        [ -n "$file" ] || continue
+
+        case "$file" in
+            /*) echo "$file" ;;
+            *)  echo "$PROJECT_DIR/$file" ;;
+        esac
+
+    done <<DECLARED
+$declared
+DECLARED
+
+    find "$PROJECT_DIR" \
+        -maxdepth 3 \
+        -type f \
+        -name "*.entitlements" \
+        2>/dev/null || true
+}
+
 if [ -n "$STRIP" ]; then
 
     PBXPROJ="$PROJECT/project.pbxproj"
@@ -499,22 +535,41 @@ if [ -n "$STRIP" ]; then
     done
 
     # The matching entitlements, when Unity wrote any.
-    for entitlements in "$(dirname "$PROJECT")"/*.entitlements; do
+    ENTITLEMENTS_FOUND="$(list_entitlements | sort -u | grep -v '^$' || true)"
+
+    if [ -n "$ENTITLEMENTS_FOUND" ]; then
+
+        echo "[PEARZ] Entitlements files:"
+        echo "$ENTITLEMENTS_FOUND" | sed 's|^|[PEARZ]   |'
+
+    else
+
+        echo "[PEARZ] No entitlements file in the exported project."
+    fi
+
+    while IFS= read -r entitlements; do
 
         [ -f "$entitlements" ] || continue
 
         for key in \
             com.apple.developer.in-app-payments \
+            com.apple.developer.storekit-external-purchase \
+            com.apple.developer.storekit-external-purchase-link \
             aps-environment; do
 
             /usr/libexec/PlistBuddy -c "Print :$key" "$entitlements" \
                 >/dev/null 2>&1 || continue
 
-            /usr/libexec/PlistBuddy -c "Delete :$key" "$entitlements" \
-                >/dev/null 2>&1 &&
-                echo "[PEARZ] Removed entitlement: $key"
+            if /usr/libexec/PlistBuddy -c "Delete :$key" "$entitlements" \
+                >/dev/null 2>&1; then
+
+                echo "[PEARZ] Removed entitlement $key from $entitlements"
+            fi
         done
-    done
+
+    done <<ENTITLEMENTS
+$ENTITLEMENTS_FOUND
+ENTITLEMENTS
 fi
 
 rm -rf "$DERIVED"
@@ -525,6 +580,35 @@ BUILD_OK=1
 
 xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
 
+# A free Personal Team cannot sign In-App Purchase, push and
+# friends: "Personal development teams ... do not support the
+# In-App Purchase capability". The capability is stripped from
+# the project above, but Xcode also derives what a profile must
+# contain from the entitlements file the target points at, and
+# Unity writes that file in a different place per version.
+#
+# Building with no entitlements at all settles it. The device
+# test build loses IAP, push and keychain sharing; the App Store
+# path (release/ios) never comes through here, so nothing that
+# ships is affected.
+if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && grep -qE \
+    "do not support the|does not support the|doesn't include the .*capability" \
+    "$BUILD_LOG"; then
+
+    echo "========================================"
+    echo "[PEARZ] This team cannot sign a capability the project asks"
+    echo "[PEARZ] for. Retrying without entitlements - test build only."
+    echo "========================================"
+
+    rm -rf "$DERIVED"
+
+    BUILD_OK=1
+
+    xcodebuild "${BUILD_ARGS[@]}" \
+        CODE_SIGN_ENTITLEMENTS="" \
+        build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+fi
+
 if [ "$BUILD_OK" -eq 0 ]; then
 
     echo "[PEARZ] ERROR: xcodebuild failed."
@@ -533,6 +617,26 @@ if [ "$BUILD_OK" -eq 0 ]; then
         "$BUILD_LOG"; then
 
         signing_help
+    fi
+
+    if grep -qE "do not support the|does not support the|doesn't include the .*capability" \
+        "$BUILD_LOG"; then
+
+        echo "[PEARZ]"
+        echo "[PEARZ] --- capability not signable by this team ---"
+        echo "[PEARZ] Team $TEAM is a free Personal Team. Apple does not"
+        echo "[PEARZ] issue development profiles with In-App Purchase for"
+        echo "[PEARZ] one, and stripping it from the exported project was"
+        echo "[PEARZ] not enough."
+        echo "[PEARZ]"
+        echo "[PEARZ] Options:"
+        echo "[PEARZ]  - Turn Unity IAP off in the build used by"
+        echo "[PEARZ]    release/ios-test, or"
+        echo "[PEARZ]  - sign in with an Apple ID in a paid team and set"
+        echo "[PEARZ]    UMP_IOS_TEAM_ID to it, or"
+        echo "[PEARZ]  - add the capability to UMP_IOS_STRIP_CAPABILITIES"
+        echo "[PEARZ]    if the log names another one."
+        echo "[PEARZ]"
     fi
 
     rm -f "$BUILD_LOG"

@@ -18,6 +18,7 @@ if [ -z "$UNITY_PATH" ] || [ ! -x "$UNITY_PATH" ]; then
     exit 1
 fi
 
+echo "[PEARZ] UMP        : @UMP_VERSION@"
 echo "[PEARZ] Unity Path : $UNITY_PATH"
 echo "[PEARZ] Branch     : ${BRANCH_NAME:-unknown}"
 echo "[PEARZ] Workspace  : ${WORKSPACE:-unknown}"

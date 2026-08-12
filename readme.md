@@ -71,6 +71,38 @@ That user then needs write access to the folder. The first build after
 this change re-clones the project into the new location; the old workspace
 under `~/.jenkins/workspace` can be deleted by hand.
 
+## iOS test install (release/ios-test)
+
+`Jenkins/install_ios_device.sh` compiles the Xcode project Unity exported
+and installs it on the device attached to the Jenkins Mac.
+
+A **free Apple ID gives a Personal Team**, and Apple refuses to issue a
+development profile with In-App Purchase for one:
+
+```
+Cannot create a iOS App Development provisioning profile for "com.x.y".
+Personal development teams, including "...", do not support the
+In-App Purchase capability.
+```
+
+The script therefore strips `com.apple.InAppPurchase` from the **exported**
+project (`Builds/`, never the repo or the game code), removes the IAP and
+push keys from any `.entitlements` it finds, and - if Xcode still asks for
+a capability the team cannot sign - retries once with no entitlements at
+all. The test build then has no IAP, no push and no keychain sharing;
+`release/ios` (Archive/TestFlight) never goes through this script, so what
+ships is untouched.
+
+- `UMP_IOS_STRIP_CAPABILITIES=""` turns all of it off (paid team).
+- `UMP_IOS_STRIP_CAPABILITIES="com.apple.InAppPurchase com.apple.Push"`
+  strips more when the log names another capability.
+- `UMP_IOS_TEAM_ID` picks the team; otherwise Player Settings, then the
+  Apple ID signed in to Xcode, then a certificate on the Mac.
+
+Every generated script prints `UMP <version>` at the top. If that version
+is older than the package, the branch is running scripts from an earlier
+sync - re-sync in Unity and push the `Jenkins/` folder to **that branch**.
+
 ## Android signing
 
 No Jenkins credential: the key is committed with the game and looked up by

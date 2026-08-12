@@ -63,10 +63,12 @@ namespace UMP
                 return false;
             }
 
+            string version = PackageVersion(packageRoot);
+
             try
             {
                 for (int i = 0; i < Files.GetLength(0); i++)
-                    Copy(projectRoot, packageRoot, Files[i, 0], Files[i, 1]);
+                    Copy(projectRoot, packageRoot, Files[i, 0], Files[i, 1], version);
             }
             catch (Exception ex)
             {
@@ -217,7 +219,8 @@ namespace UMP
             string projectRoot,
             string packageRoot,
             string sourceRelative,
-            string destinationRelative)
+            string destinationRelative,
+            string version)
         {
             string source = Path.Combine(packageRoot, sourceRelative);
             string destination = Path.Combine(projectRoot, destinationRelative);
@@ -232,6 +235,11 @@ namespace UMP
             // Shell and Python files run on the Jenkins Mac,
             // so they must keep LF endings.
             string content = File.ReadAllText(source).Replace("\r\n", "\n");
+
+            // Every generated script prints its version. A branch that
+            // was never re-synced then says so in the build log instead
+            // of failing in a way the current templates already fix.
+            content = content.Replace("@UMP_VERSION@", version);
 
             // Skip identical files so Unity does not reimport
             // JenkinsBuild.cs on every sync.
