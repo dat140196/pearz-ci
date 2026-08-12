@@ -34,6 +34,11 @@ if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
     exit 0
 fi
 
+# A credential pasted with a trailing newline or wrapped in
+# quotes is a silent "chat not found" otherwise.
+TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]\$//")"
+CHAT_ID="$(printf '%s' "$CHAT_ID" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]\$//")"
+
 STATUS="${UMP_BUILD_STATUS:-UNKNOWN}"
 BRANCH="${BRANCH_NAME:-unknown}"
 JOB="${JOB_NAME:-unknown}"
@@ -88,6 +93,59 @@ tg_error() {
         | sed -n 's/.*"description":"\([^"]*\)".*/\1/p' \
         | head -n 1
 }
+
+# ------------------------------------------------------------
+# Preflight
+#
+# "chat not found" is the usual setup mistake and says nothing
+# about which of the two credentials is wrong. Jenkins masks the
+# chat id in the log, so its shape is printed instead of the
+# value - enough to see a missing "-100" or a stray character.
+# ------------------------------------------------------------
+
+BOT_INFO="$(tg_api getMe)"
+
+if tg_ok "$BOT_INFO"; then
+
+    echo "[PEARZ] Telegram bot: @$(echo "$BOT_INFO" \
+        | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -n 1)"
+
+else
+
+    echo "[PEARZ] Telegram token rejected: $(tg_error "$BOT_INFO")"
+    echo "[PEARZ] Check the UMP_TELEGRAM_BOT_TOKEN credential."
+
+    exit 0
+fi
+
+CHAT_INFO="$(tg_api getChat --data-urlencode "chat_id=${CHAT_ID}")"
+
+if tg_ok "$CHAT_INFO"; then
+
+    echo "[PEARZ] Telegram chat: $(echo "$CHAT_INFO" \
+        | sed -n 's/.*"title":"\([^"]*\)".*/\1/p' | head -n 1)"
+
+    if ! echo "$CHAT_INFO" | grep -q '"is_forum":true'; then
+
+        IS_FORUM=0
+    else
+        IS_FORUM=1
+    fi
+
+else
+
+    echo "[PEARZ] Telegram chat unusable: $(tg_error "$CHAT_INFO")"
+    echo "[PEARZ] UMP_TELEGRAM_CHAT_ID has the shape" \
+        "$(printf '%s' "$CHAT_ID" | sed 's/[0-9]/#/g')" \
+        "(${#CHAT_ID} characters)."
+    echo "[PEARZ] A supergroup id starts with -100 and is 14"
+    echo "[PEARZ] characters long. Read it again from"
+    echo "[PEARZ] https://api.telegram.org/bot<token>/getUpdates"
+    echo "[PEARZ] after posting in the group, and remember that the"
+    echo "[PEARZ] id changes when a group becomes a supergroup."
+
+    exit 0
+fi
 
 # ------------------------------------------------------------
 # Topic of a forum group
@@ -200,8 +258,14 @@ if [ -z "$THREAD" ] && [ -n "${UMP_TELEGRAM_TOPICS:-}" ]; then
     IFS="$OLD_IFS"
 fi
 
+if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ] && [ "$IS_FORUM" = "0" ]; then
+
+    echo "[PEARZ] Topics are off for this group, posting to the group."
+    echo "[PEARZ] Group Settings > Topics turns them on."
+fi
+
 # 3. The topic this bot created for the game earlier, or a new one.
-if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ]; then
+if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ] && [ "$IS_FORUM" = "1" ]; then
 
     THREAD="$(topic_remembered)"
 
