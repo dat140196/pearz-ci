@@ -56,6 +56,21 @@ ARTIFACT="${UMP_ARTIFACT:-}"
 
 GAME="${UMP_GAME_NAME:-}"
 
+# Unity writes this next to the artifact at the end of the build:
+#   PRODUCT_NAME=, VERSION=, BUILD_NUMBER=, ARTIFACT=
+INFO_FILE="${UMP_BUILD_INFO:-Builds/ump_build_info.txt}"
+
+info_value() {
+
+    [ -f "$INFO_FILE" ] || return 0
+
+    awk -F'=' -v key="$1" \
+        '$1 == key { sub(/^[^=]*=/, ""); print; exit }' \
+        "$INFO_FILE" 2>/dev/null | tr -d '\r' || true
+}
+
+[ -n "$GAME" ] || GAME="$(info_value PRODUCT_NAME)"
+
 if [ -z "$GAME" ] && [ -f "${WORKSPACE:-}/ProjectSettings/ProjectSettings.asset" ]; then
 
     GAME="$(sed -n 's/^  productName: //p' \
@@ -66,6 +81,32 @@ fi
 
 # "MeowPuzzle/release%2Fandroid" -> "MeowPuzzle"
 [ -n "$GAME" ] || GAME="${JOB%%/*}"
+
+VERSION="$(info_value VERSION)"
+VERSION_CODE="$(info_value BUILD_NUMBER)"
+
+# ------------------------------------------------------------
+# Google Drive link
+#
+# upload_drive_impl.py leaves it in the workspace. The workspace
+# is kept between builds, so the artifact name it was written
+# for has to match this build's artifact.
+# ------------------------------------------------------------
+
+DRIVE_FILE="${UMP_DRIVE_URL_FILE:-Builds/ump_drive_url.txt}"
+DRIVE_URL=""
+
+if [ -f "$DRIVE_FILE" ] && [ -n "$ARTIFACT" ]; then
+
+    DRIVE_FOR="$(awk -F'=' '$1 == "artifact" { sub(/^[^=]*=/, ""); print; exit }' \
+        "$DRIVE_FILE" 2>/dev/null | tr -d '\r' || true)"
+
+    if [ "$DRIVE_FOR" = "$(basename "$ARTIFACT")" ]; then
+
+        DRIVE_URL="$(awk -F'=' '$1 == "url" { sub(/^[^=]*=/, ""); print; exit }' \
+            "$DRIVE_FILE" 2>/dev/null | tr -d '\r' || true)"
+    fi
+fi
 
 # ------------------------------------------------------------
 # Telegram helpers
@@ -104,11 +145,14 @@ tg_error() {
 # ------------------------------------------------------------
 
 BOT_INFO="$(tg_api getMe)"
+BOT_NAME=""
 
 if tg_ok "$BOT_INFO"; then
 
-    echo "[PEARZ] Telegram bot: @$(echo "$BOT_INFO" \
+    BOT_NAME="$(echo "$BOT_INFO" \
         | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -n 1)"
+
+    echo "[PEARZ] Telegram bot: @$BOT_NAME"
 
 else
 
@@ -138,11 +182,32 @@ else
     echo "[PEARZ] UMP_TELEGRAM_CHAT_ID has the shape" \
         "$(printf '%s' "$CHAT_ID" | sed 's/[0-9]/#/g')" \
         "(${#CHAT_ID} characters)."
-    echo "[PEARZ] A supergroup id starts with -100 and is 14"
-    echo "[PEARZ] characters long. Read it again from"
-    echo "[PEARZ] https://api.telegram.org/bot<token>/getUpdates"
-    echo "[PEARZ] after posting in the group, and remember that the"
-    echo "[PEARZ] id changes when a group becomes a supergroup."
+
+    # The bot's own view of the world settles it: whatever it has
+    # been talking to is listed with the id to use. Never build an
+    # id by hand - a "-100" glued in front of a small group id
+    # looks perfectly valid and is not a chat.
+    UPDATES="$(tg_api getUpdates)"
+
+    CHATS="$(echo "$UPDATES" \
+        | tr '{' '\n' \
+        | sed -n 's/.*"id":\(-\{0,1\}[0-9]\{1,\}\),"title":"\([^"]*\)","type":"\([^"]*\)".*/\1  \3  \2/p' \
+        | sort -u || true)"
+
+    if [ -n "$CHATS" ]; then
+
+        echo "[PEARZ] Groups @$BOT_NAME can actually see:"
+        echo "$CHATS" | sed 's/^/[PEARZ]   /'
+        echo "[PEARZ] Copy that id into UMP_TELEGRAM_CHAT_ID as it is."
+
+    else
+
+        echo "[PEARZ] @$BOT_NAME has received nothing from any group."
+        echo "[PEARZ] Check that this bot - not another one - is in the"
+        echo "[PEARZ] group, then post /start@$BOT_NAME there and read"
+        echo "[PEARZ] https://api.telegram.org/bot<token>/getUpdates"
+        echo "[PEARZ] The id changes when a group becomes a supergroup."
+    fi
 
     exit 0
 fi
@@ -296,14 +361,34 @@ if [ "$STATUS" = "FAILURE" ]; then
     ICON="❌"
 fi
 
-TEXT="${ICON} ${GAME} - ${STATUS}\nBranch: ${BRANCH}\nBuild: #${BUILD}"
+# A real newline: "\n" in the body is sent to Telegram as two
+# characters and shows up as "\n" in the message.
+NL="
+"
+
+TEXT="${ICON} ${GAME} - ${STATUS}"
+TEXT="${TEXT}${NL}Branch: ${BRANCH}"
+TEXT="${TEXT}${NL}Build: #${BUILD}"
+
+if [ -n "$VERSION" ]; then
+
+    if [ -n "$VERSION_CODE" ]; then
+        TEXT="${TEXT}${NL}Version: ${VERSION} (${VERSION_CODE})"
+    else
+        TEXT="${TEXT}${NL}Version: ${VERSION}"
+    fi
+fi
 
 if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
-    TEXT="${TEXT}\nArtifact: $(basename "$ARTIFACT")"
+    TEXT="${TEXT}${NL}Artifact: $(basename "$ARTIFACT")"
+fi
+
+if [ -n "$DRIVE_URL" ]; then
+    TEXT="${TEXT}${NL}Drive: ${DRIVE_URL}"
 fi
 
 if [ -n "$URL" ]; then
-    TEXT="${TEXT}\nJenkins: ${URL}"
+    TEXT="${TEXT}${NL}Jenkins: ${URL}"
 fi
 
 send_message() {

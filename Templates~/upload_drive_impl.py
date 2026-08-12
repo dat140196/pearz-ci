@@ -673,12 +673,36 @@ def upload(access_token, folder_id, file_path, using_service_account, info):
     log("File ID: " + (file_id or "unknown"))
     log("File name: " + result.get("name", file_name))
 
-    log(
-        "Drive URL: " + (
-            result.get("webViewLink") or
-            "https://drive.google.com/file/d/" + file_id + "/view"
-        )
+    url = (
+        result.get("webViewLink") or
+        "https://drive.google.com/file/d/" + file_id + "/view"
     )
+
+    log("Drive URL: " + url)
+
+    # The Telegram notification runs in a later step, in another
+    # process, so the link is left where it can pick it up. The
+    # artifact name goes with it: the workspace survives between
+    # builds and a stale link must not be reported as this one.
+    url_path = os.environ.get(
+        "UMP_DRIVE_URL_FILE",
+        "Builds/ump_drive_url.txt"
+    )
+
+    try:
+
+        directory = os.path.dirname(url_path)
+
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        with open(url_path, "w") as f:
+            f.write("url=" + url + "\n")
+            f.write("artifact=" + os.path.basename(file_path) + "\n")
+
+    except Exception as e:
+
+        log("Could not write " + url_path + ": " + str(e))
 
 
 # ============================================================

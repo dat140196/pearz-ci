@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.0.6
+# UMP Unity Mobile Pipeline 1.0.7
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -8,7 +8,7 @@ aborts the build with `Project has invalid dependencies`. Add `#<tag>` in
 `Packages/manifest.json`:
 
 ```json
-"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.6"
+"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.7"
 ```
 
 Unity then locks that revision in `packages-lock.json` and reuses its
@@ -46,9 +46,18 @@ it is 50 MB or smaller:
 ✅ MeowPuzzle - SUCCESS
 Branch: release/android
 Build: #14
+Version: 1.0.0 (7)
 Artifact: MeowPuzzle-v1.0.0.aab
+Drive: https://drive.google.com/file/d/1sztK.../view
 Jenkins: http://.../job/MeowPuzzle/job/release%2Fandroid/14/
 ```
+
+`Version` is `bundleVersion (versionCode)` from Player Settings - the
+Android bundle version code, or the iOS build number on an iOS branch -
+read from `Builds/ump_build_info.txt` which Unity writes at the end of the
+build. The `Drive` line appears on the Android branches, from
+`Builds/ump_drive_url.txt` which the uploader writes; a link left by an
+earlier build is ignored unless it belongs to this build's artifact.
 
 The name is the **productName** from Player Settings, so several games on
 one Jenkins are told apart at a glance. `UMP_GAME_NAME` overrides it.

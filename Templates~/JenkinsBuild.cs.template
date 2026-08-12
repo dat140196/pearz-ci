@@ -180,6 +180,15 @@ public static class JenkinsBuild
         return builder.Length == 0 ? "Game" : builder.ToString();
     }
 
+    // Android counts with an integer, iOS with a string, and the
+    // notification shows whichever one this build really used.
+    private static string BuildNumber()
+    {
+        return EditorUserBuildSettings.activeBuildTarget == BuildTarget.iOS
+            ? PlayerSettings.iOS.buildNumber
+            : PlayerSettings.Android.bundleVersionCode.ToString();
+    }
+
     private static void WriteBuildInfo(string artifact)
     {
         try
@@ -191,7 +200,7 @@ public static class JenkinsBuild
                 "PRODUCT_NAME=" + PlayerSettings.productName,
                 "PRODUCT_NAME_SAFE=" + Sanitize(PlayerSettings.productName),
                 "VERSION=" + PlayerSettings.bundleVersion,
-                "BUILD_NUMBER=" + PlayerSettings.Android.bundleVersionCode,
+                "BUILD_NUMBER=" + BuildNumber(),
                 "ARTIFACT=" + artifact
             };
 

@@ -5,6 +5,7 @@ Builds/iOS/
 Builds/iOSArchive/
 Builds/iOSExport/
 Builds/ump_build_info.txt
+Builds/ump_drive_url.txt
 .ump_artifact_path
 
 # Release keystores are read by Jenkins from this folder and MUST be
