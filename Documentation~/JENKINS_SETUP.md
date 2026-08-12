@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.12.2
+# UMP Jenkins Setup 1.12.4
 
 ## Install / sync
 
@@ -11,6 +11,31 @@ builds never rewrite their own workspace.
 
 Force a sync from **Pearz > SetupJenkin** -> `Force Sync UMP Files`.
 Commit the generated files.
+
+### Pin the package version
+
+In the game's `Packages/manifest.json`, reference UMP with a tag:
+
+```json
+"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.12.2"
+```
+
+Without `#<tag>`, Unity re-resolves the git dependency on **every** build:
+it contacts GitHub to see whether the branch moved, even though the
+package already sits in `Library/PackageCache`. When the machine cannot
+reach github.com the editor aborts before running the build method:
+
+```
+An error occurred while resolving packages:
+  Project has invalid dependencies:
+    com.ump.pearz-build-pipeline: Error when executing git command.
+    fatal: unable to access '...': Failed to connect to github.com port 443
+```
+
+A pinned revision is locked by hash in `packages-lock.json` and served
+from the cache, so builds stop depending on GitHub being reachable and
+become reproducible. Tag the package repo when you release:
+`git tag 1.12.2 && git push origin 1.12.2`.
 
 Branches:
 - release/android -> AAB
@@ -364,10 +389,12 @@ Resolution order:
    Unity writes into the Xcode project. Ticking *Automatically Sign* alone
    is **not enough** - an empty team field fails with
    `Signing for "Unity-iPhone" requires a development team`.
-3. The signing certificate installed on the Mac. The team is read from the
-   `OU` of an *Apple Development* certificate, so in practice nothing has
-   to be configured at all. If the Mac holds certificates for several
-   teams, the script lists them and stops rather than guessing.
+3. The team of an Apple ID signed in to Xcode.
+4. The `OU` of an *Apple Development* certificate in the keychain - last
+   resort, since a certificate can outlive the account that made it.
+
+Only teams the signed-in account belongs to can get a profile, so the
+stage warns when a forced team is not among them.
 
 Nothing found at all stops the stage immediately with instructions instead
 of handing xcodebuild a project it cannot sign.

@@ -1,6 +1,18 @@
-# UMP Unity Mobile Pipeline 1.12.2
+# UMP Unity Mobile Pipeline 1.12.4
 
 Install using Unity Package Manager -> Add package from Git URL.
+
+**Pin the version.** An unpinned git URL makes Unity contact GitHub on
+every single build to check whether the branch moved, so a network hiccup
+aborts the build with `Project has invalid dependencies`. Add `#<tag>` in
+`Packages/manifest.json`:
+
+```json
+"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.12.2"
+```
+
+Unity then locks that revision in `packages-lock.json` and reuses its
+cache. Change the tag when you want the update.
 
 The Jenkinsfile and the `Jenkins/` scripts are written into the project
 **automatically** when the package is installed or updated - nothing to click.
@@ -28,6 +40,18 @@ Jenkins credentials (Secret text):
 Android signing needs no credential: commit the key as
 `Keystores/<package-name>.keystore` + `.properties` in the game repo
 (see JENKINS_SETUP.md).
+
+## 1.12.4
+- Prefer the team of the Apple ID signed in to Xcode over a certificate
+  found in the keychain, and warn when the team being forced is not one
+  the account belongs to - that mismatch fails as "No profiles for ...",
+  which reads like a missing account.
+
+## 1.12.3
+- On a signing failure the log now prints the build user, whether an
+  Xcode account token is visible from the Jenkins session, the keychain
+  search list and the profile count - enough to tell "no account" apart
+  from "locked keychain" without another build.
 
 ## 1.12.2
 - The "no Apple ID signed in" check is a hint, not a gate: where Xcode

@@ -250,6 +250,16 @@ INNER
     echo "$found" | grep -v '^$' | sort -u
 }
 
+# Teams of the Apple IDs signed in to Xcode. These are the only
+# ones automatic signing can actually create a profile for - a
+# leftover certificate in the keychain proves nothing.
+detect_account_teams() {
+
+    defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
+        | sed -n 's/.*teamID[[:space:]]*=[[:space:]]*"\{0,1\}\([A-Z0-9]\{10\}\)"\{0,1\}.*/\1/p' \
+        | sort -u
+}
+
 TEAM="${UMP_IOS_TEAM_ID:-}"
 TEAM_SOURCE="UMP_IOS_TEAM_ID"
 
@@ -261,6 +271,26 @@ if [ -z "$TEAM" ]; then
         | tr -d ' \r' || true)"
 
     TEAM_SOURCE="Player Settings"
+fi
+
+ACCOUNT_TEAMS="$(detect_account_teams || true)"
+
+if [ -z "$TEAM" ]; then
+
+    COUNT="$(echo "$ACCOUNT_TEAMS" | grep -c . || true)"
+
+    if [ "$COUNT" -eq 1 ]; then
+
+        TEAM="$ACCOUNT_TEAMS"
+        TEAM_SOURCE="Apple ID signed in to Xcode"
+
+    elif [ "$COUNT" -gt 1 ]; then
+
+        echo "[PEARZ] Several teams signed in to Xcode:"
+        echo "$ACCOUNT_TEAMS"
+        echo "[PEARZ] Set UMP_IOS_TEAM_ID or Player Settings ->"
+        echo "[PEARZ] iOS -> Signing Team ID to pick one."
+    fi
 fi
 
 if [ -z "$TEAM" ]; then
@@ -281,6 +311,18 @@ if [ -z "$TEAM" ]; then
         echo "[PEARZ] Set UMP_IOS_TEAM_ID or Player Settings ->"
         echo "[PEARZ] iOS -> Signing Team ID to pick one."
     fi
+fi
+
+# Forcing a team the signed-in account does not belong to fails
+# with "No profiles for ... were found", which reads like a
+# missing account rather than a mismatch.
+if [ -n "$TEAM" ] && [ -n "$ACCOUNT_TEAMS" ] && \
+   ! echo "$ACCOUNT_TEAMS" | grep -qx "$TEAM"; then
+
+    echo "[PEARZ] WARNING: team $TEAM ($TEAM_SOURCE) is not one of"
+    echo "[PEARZ] the teams signed in to Xcode:"
+    echo "$ACCOUNT_TEAMS" | sed 's/^/[PEARZ]   /'
+    echo "[PEARZ] Automatic signing cannot create a profile for it."
 fi
 
 if [ -n "$TEAM" ]; then
@@ -337,7 +379,46 @@ has_xcode_account() {
 
 signing_help() {
 
+    local profiles=0
+    local dir
+    local token="NOT visible from this session"
+
+    for dir in "${PROFILE_DIRS[@]}"; do
+        [ -d "$dir" ] || continue
+        profiles=$((profiles + $(ls -1 "$dir"/*.mobileprovision 2>/dev/null | wc -l | tr -d ' ')))
+    done
+
+    security find-generic-password -s "Xcode-Token" >/dev/null 2>&1 &&
+        token="found"
+
     echo "[PEARZ]"
+    echo "[PEARZ] --- signing diagnostics ---"
+    echo "[PEARZ] build user          : $(id -un 2>/dev/null || echo unknown)"
+    echo "[PEARZ] home                : $HOME"
+    echo "[PEARZ] Xcode account token : $token"
+    echo "[PEARZ] teams signed in     : ${ACCOUNT_TEAMS:-<none>}"
+    echo "[PEARZ] team used for build : $TEAM ($TEAM_SOURCE)"
+    echo "[PEARZ] provisioning profiles: $profiles"
+    echo "[PEARZ] keychains in search list:"
+
+    security list-keychains 2>/dev/null | sed 's/^/[PEARZ]   /' || true
+
+    echo "[PEARZ]"
+
+    if [ "$token" = "found" ]; then
+
+        echo "[PEARZ] An Xcode account IS visible, so this is most"
+        echo "[PEARZ] likely the login keychain being locked for the"
+        echo "[PEARZ] Jenkins session. Unlock it before the build:"
+        echo "[PEARZ]   security unlock-keychain -p <password> \\"
+        echo "[PEARZ]     ~/Library/Keychains/login.keychain-db"
+        echo "[PEARZ] Running Jenkins as a LaunchAgent inside the"
+        echo "[PEARZ] user's GUI session avoids this for good."
+        echo "[PEARZ]"
+
+        return
+    fi
+
     echo "[PEARZ] Xcode needs an Apple ID signed in to create the"
     echo "[PEARZ] provisioning profile for $BUNDLE_ID - a certificate"
     echo "[PEARZ] in the keychain is not enough."
