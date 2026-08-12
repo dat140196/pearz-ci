@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.12.1
+# UMP Jenkins Setup 1.12.2
 
 ## Install / sync
 
@@ -375,9 +375,13 @@ of handing xcodebuild a project it cannot sign.
 **A certificate is not an account.** Automatic signing also needs an Apple
 ID signed in to Xcode *as the user Jenkins runs as*, otherwise xcodebuild
 reports `No Accounts: Add a new account in Accounts settings` and
-`No profiles for '<bundle id>' were found`. The stage checks for this
-before building and says so. Fix it once on the Mac: Xcode -> Settings ->
-Accounts -> **+** -> Apple Account.
+`No profiles for '<bundle id>' were found`. Fix it once on the Mac: Xcode
+-> Settings -> Accounts -> **+** -> Apple Account.
+
+The stage notes when it cannot find a signed-in account but still runs the
+build - Xcode stores that state differently across versions, so the check
+is only a hint. When xcodebuild does fail on signing, the guidance is
+printed from its real error.
 
 For a headless Mac (paid account only), an App Store Connect API key
 replaces the signed-in account. Create it in App Store Connect -> Users

@@ -318,32 +318,73 @@ else
     exit 1
 fi
 
-if [ "$USING_API_KEY" -eq 0 ] && \
-   ! defaults read com.apple.dt.Xcode IDEProvisioningTeams >/dev/null 2>&1 && \
-   ! has_profile_for "$BUNDLE_ID"; then
+# Where Xcode records signed-in accounts differs between
+# versions, so treat a negative result as a hint only - never
+# block a build on it. xcodebuild has the final word.
+has_xcode_account() {
 
-    echo "[PEARZ] ERROR: Xcode has no Apple ID signed in."
-    echo "[PEARZ] The keychain holds a certificate for team $TEAM,"
-    echo "[PEARZ] but without an account Xcode cannot create the"
-    echo "[PEARZ] provisioning profile for $BUNDLE_ID."
+    defaults read com.apple.dt.Xcode IDEProvisioningTeams \
+        >/dev/null 2>&1 && return 0
+
+    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists \
+        >/dev/null 2>&1 && return 0
+
+    security find-generic-password -s "Xcode-Token" \
+        >/dev/null 2>&1 && return 0
+
+    return 1
+}
+
+signing_help() {
+
+    echo "[PEARZ]"
+    echo "[PEARZ] Xcode needs an Apple ID signed in to create the"
+    echo "[PEARZ] provisioning profile for $BUNDLE_ID - a certificate"
+    echo "[PEARZ] in the keychain is not enough."
     echo "[PEARZ]"
     echo "[PEARZ] On this Mac, logged in as the user Jenkins runs as"
     echo "[PEARZ] (${USER:-unknown}): Xcode -> Settings -> Accounts -> +"
     echo "[PEARZ] -> Apple Account. A free Apple ID is enough for a"
-    echo "[PEARZ] test device; the account must belong to team $TEAM"
-    echo "[PEARZ] to reuse that certificate."
+    echo "[PEARZ] test device; an account in team $TEAM reuses the"
+    echo "[PEARZ] certificate already installed here."
     echo "[PEARZ]"
     echo "[PEARZ] Headless alternative (paid account): create an App"
     echo "[PEARZ] Store Connect API key and set UMP_ASC_KEY_PATH,"
     echo "[PEARZ] UMP_ASC_KEY_ID and UMP_ASC_ISSUER_ID in Jenkins."
+}
+
+if [ "$USING_API_KEY" -eq 0 ] && \
+   ! has_xcode_account && \
+   ! has_profile_for "$BUNDLE_ID"; then
+
+    echo "[PEARZ] Note: no signed-in Xcode account found."
+    echo "[PEARZ] Building anyway - Xcode may still know better."
+fi
+
+rm -rf "$DERIVED"
+
+BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodebuild-XXXXXX")"
+
+BUILD_OK=1
+
+xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+
+if [ "$BUILD_OK" -eq 0 ]; then
+
+    echo "[PEARZ] ERROR: xcodebuild failed."
+
+    if grep -qE "No Accounts|No profiles for|requires a development team" \
+        "$BUILD_LOG"; then
+
+        signing_help
+    fi
+
+    rm -f "$BUILD_LOG"
 
     exit 1
 fi
 
-
-rm -rf "$DERIVED"
-
-xcodebuild "${BUILD_ARGS[@]}" build
+rm -f "$BUILD_LOG"
 
 # ------------------------------------------------------------
 # Locate the .app

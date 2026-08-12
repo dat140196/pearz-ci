@@ -16,7 +16,7 @@ namespace UMP
 
         private void OnGUI()
         {
-            EditorGUILayout.LabelField("UMP Mobile Pipeline 1.12.1", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("UMP Mobile Pipeline 1.12.2", EditorStyles.boldLabel);
             EditorGUILayout.Space(8);
 
             EditorGUILayout.HelpBox(
