@@ -28,6 +28,13 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 # ------------------------------------------------------------
+# Signing. Exports UMP_ANDROID_* from the Jenkins credential or
+# from the keystore store on this machine.
+# ------------------------------------------------------------
+
+. "$SCRIPT_DIR/resolve_keystore.sh"
+
+# ------------------------------------------------------------
 # Android TEST
 # release/android-test -> APK
 # ------------------------------------------------------------

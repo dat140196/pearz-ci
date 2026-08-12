@@ -1,4 +1,4 @@
-# UMP 1.5.0 Checklist
+# UMP 1.8.0 Checklist
 - [ ] Install UMP by Git URL
 - [ ] Open the project once (files sync automatically; Pearz > SetupJenkin forces it)
 - [ ] Commit the generated Jenkinsfile + Jenkins/ folder
@@ -9,6 +9,7 @@
 - [ ] Create the destination folder in a **Shared Drive** (service accounts have no storage quota)
 - [ ] Add the service-account email as Content manager on that Shared Drive
 - [ ] Set UMP_DRIVE_SERVICE_ACCOUNT_JSON + UMP_DRIVE_FOLDER_ID credentials
+- [ ] Commit Keystores/<package>.keystore + <package>.properties in the game repo (required for AAB)
 - [ ] Test release/android
 - [ ] Test release/android-test
 - [ ] Test release/ios-test

@@ -6,3 +6,10 @@ Builds/iOSArchive/
 Builds/iOSExport/
 Builds/ump_build_info.txt
 .ump_artifact_path
+
+# Release keystores are read by Jenkins from this folder and MUST be
+# committed. Keep the repository private: the passwords are plain text.
+!Keystores/
+!Keystores/*.keystore
+!Keystores/*.jks
+!Keystores/*.properties

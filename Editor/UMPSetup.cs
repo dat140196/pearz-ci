@@ -17,6 +17,7 @@ namespace UMP
             { "Templates~/Jenkinsfile.template", "Jenkinsfile" },
             { "Templates~/JenkinsBuild.cs.template", "Assets/Editor/JenkinsBuild.cs" },
             { "Templates~/find_unity.sh.template", "Jenkins/find_unity.sh" },
+            { "Templates~/resolve_keystore.sh.template", "Jenkins/resolve_keystore.sh" },
             { "Templates~/build_android.sh.template", "Jenkins/build_android.sh" },
             { "Templates~/build_ios.sh.template", "Jenkins/build_ios.sh" },
             { "Templates~/archive_ios.sh.template", "Jenkins/archive_ios.sh" },
@@ -24,12 +25,14 @@ namespace UMP
             { "Templates~/upload_drive.sh.template", "Jenkins/upload_drive.sh" },
             { "Templates~/upload_drive_impl.py", "Jenkins/upload_drive_impl.py" },
             { "Templates~/notify_telegram.sh.template", "Jenkins/notify_telegram.sh" },
-            { "Templates~/ExportOptions.plist.template", "Jenkins/ExportOptions.plist" }
+            { "Templates~/ExportOptions.plist.template", "Jenkins/ExportOptions.plist" },
+            { "Templates~/Keystores.README.template", "Keystores/README.md" }
         };
 
         private static readonly string[] Executables =
         {
             "Jenkins/find_unity.sh",
+            "Jenkins/resolve_keystore.sh",
             "Jenkins/build_android.sh",
             "Jenkins/build_ios.sh",
             "Jenkins/archive_ios.sh",

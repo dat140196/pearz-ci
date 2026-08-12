@@ -1,3 +1,92 @@
+// ============================================================
+// ANDROID BUILD + SIGNING
+//
+// Unity does not create a release keystore and does not keep
+// keystore passwords in the project.
+//
+// Default (recommended for several projects on one Jenkins):
+// no credential at all. Jenkins/resolve_keystore.sh picks the
+// keystore out of ~/.pearz/keystores by applicationIdentifier,
+// so a new project only means two more files on the Mac.
+//
+// Optional per-job override, e.g. one Jenkins folder per game:
+//   UMP_ANDROID_KEYSTORE          Secret file (.keystore / .jks)
+//   UMP_ANDROID_KEYSTORE_PASS     Secret text
+//   UMP_ANDROID_KEY_ALIAS         Secret text
+//   UMP_ANDROID_KEY_ALIAS_PASS    Secret text
+//
+// With neither, a test APK still builds with the Android debug
+// key; an AAB fails, because Google Play rejects debug signing.
+// ============================================================
+
+def buildAndroid() {
+
+    def signed = true
+
+    // Probe first: a missing credential must not be confused with
+    // a failing Unity build.
+    try {
+
+        withCredentials([
+            file(
+                credentialsId: 'UMP_ANDROID_KEYSTORE',
+                variable: 'UMP_KEYSTORE_PROBE'
+            )
+        ]) {
+            echo '[PEARZ] Android keystore credential found.'
+        }
+
+    } catch (Exception e) {
+
+        signed = false
+
+        echo '[PEARZ] No UMP_ANDROID_KEYSTORE credential.'
+        echo '[PEARZ] Falling back to the keystore store on this machine.'
+    }
+
+    if (!signed) {
+
+        sh '''
+            chmod +x Jenkins/find_unity.sh
+            chmod +x Jenkins/build_android.sh
+            ./Jenkins/build_android.sh
+        '''
+
+        return
+    }
+
+    withCredentials([
+
+        file(
+            credentialsId: 'UMP_ANDROID_KEYSTORE',
+            variable: 'UMP_ANDROID_KEYSTORE'
+        ),
+
+        string(
+            credentialsId: 'UMP_ANDROID_KEYSTORE_PASS',
+            variable: 'UMP_ANDROID_KEYSTORE_PASS'
+        ),
+
+        string(
+            credentialsId: 'UMP_ANDROID_KEY_ALIAS',
+            variable: 'UMP_ANDROID_KEY_ALIAS'
+        ),
+
+        string(
+            credentialsId: 'UMP_ANDROID_KEY_ALIAS_PASS',
+            variable: 'UMP_ANDROID_KEY_ALIAS_PASS'
+        )
+
+    ]) {
+
+        sh '''
+            chmod +x Jenkins/find_unity.sh
+            chmod +x Jenkins/build_android.sh
+            ./Jenkins/build_android.sh
+        '''
+    }
+}
+
 pipeline {
 
     agent any
@@ -81,11 +170,9 @@ pipeline {
             }
 
             steps {
-                sh '''
-                    chmod +x Jenkins/find_unity.sh
-                    chmod +x Jenkins/build_android.sh
-                    ./Jenkins/build_android.sh
-                '''
+                script {
+                    buildAndroid()
+                }
             }
         }
 
@@ -103,11 +190,9 @@ pipeline {
             }
 
             steps {
-                sh '''
-                    chmod +x Jenkins/find_unity.sh
-                    chmod +x Jenkins/build_android.sh
-                    ./Jenkins/build_android.sh
-                '''
+                script {
+                    buildAndroid()
+                }
             }
         }
 

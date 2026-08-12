@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.5.0
+# UMP Jenkins Setup 1.8.0
 
 ## Install / sync
 
@@ -122,6 +122,123 @@ Spaces and characters that are illegal in file names are stripped.
 (`PRODUCT_NAME`, `PRODUCT_NAME_SAFE`, `VERSION`, `BUILD_NUMBER`, `ARTIFACT`),
 which the shell scripts read. Bump the version in Player Settings to get a
 new file name - nothing in Jenkins has to change.
+
+## Android signing (keystore)
+
+Unity **never creates a release keystore**. If none is configured it signs
+with the Android debug key (`~/.android/debug.keystore`, which the Android
+SDK does generate on its own):
+
+- `release/android-test` (APK) - debug key is fine, the APK installs on a
+  device. Only use a release key if you need a stable SHA-1 for Google
+  Sign-In / Play Games / Firebase.
+- `release/android` (AAB) - Google Play **rejects** a debug-signed bundle,
+  and the upload key can never be changed afterwards. A real keystore is
+  required, so the build fails on purpose when it is missing.
+
+Setting the keystore in *Player Settings -> Publishing Settings* is not
+enough for CI: Unity does not save the passwords in the project, so a
+`-batchmode` build has no way to read them.
+
+`Jenkins/resolve_keystore.sh` resolves the key by **package name**
+(`applicationIdentifier`), so **no project needs its own Jenkins
+credential**. It searches three places, first hit wins.
+
+### 1. Keystores/ in the project repo (normal way)
+
+Commit the key with the game; a push is all Jenkins needs.
+
+```
+Keystores/
+  com.pearz.meowpuzzle.keystore
+  com.pearz.meowpuzzle.properties
+```
+
+`<package>.properties`:
+
+```
+storePass=...
+alias=pearz
+aliasPass=...
+```
+
+The folder and a `README.md` are created by the sync. `.jks` works as well
+as `.keystore`, and `aliasPass` may be omitted when the alias uses the
+store password.
+
+Lookup keys, in this order:
+
+1. Android `applicationIdentifier` from `ProjectSettings.asset`
+   (`com.pearz.meowpuzzle`) - maps 1:1 to a Play listing
+2. Product name without spaces (`MeowPuzzle`)
+3. `default`
+
+A folder per key also works, handy when the `.jks` comes from elsewhere:
+
+```
+Keystores/com.pearz.othergame/
+  keystore.properties      <- may contain keystore=../other/release.jks
+  release.jks
+```
+
+**The passwords are plain text in the repo, so keep the repository
+private** - anyone who can read it can sign a build as you. To avoid that,
+commit only the `.keystore` and leave the `.properties` out: the resolver
+then takes `UMP_ANDROID_KEYSTORE_PASS`, `UMP_ANDROID_KEY_ALIAS` and
+`UMP_ANDROID_KEY_ALIAS_PASS` from the environment (Jenkins credentials),
+which is one set of credentials for all projects that share a password
+scheme.
+
+### 2. Keystore store on the build machine
+
+Same naming, for keys that must never be in a repo:
+
+```
+~/.pearz/keystores/            <- $UMP_KEYSTORE_HOME
+  com.pearz.othergame.keystore
+  com.pearz.othergame.properties
+  default.keystore             <- fallback for every project
+  default.properties
+```
+
+```
+chmod 700 ~/.pearz/keystores && chmod 600 ~/.pearz/keystores/*
+```
+
+### 3. Per-job credentials (highest priority)
+
+If one job must use its own key, bind these credentials in it - they win
+over both folders. With one Jenkins **folder** per game the same four IDs
+hold different values per folder, so the number of credential *IDs* stays
+at four however many projects there are.
+
+| Credential ID | Kind | Value |
+| --- | --- | --- |
+| `UMP_ANDROID_KEYSTORE` | Secret file | the `.keystore` / `.jks` file |
+| `UMP_ANDROID_KEYSTORE_PASS` | Secret text | store password |
+| `UMP_ANDROID_KEY_ALIAS` | Secret text | alias name |
+| `UMP_ANDROID_KEY_ALIAS_PASS` | Secret text | alias password |
+
+Either way `JenkinsBuild.ConfigureSigning` receives the values through
+environment variables and sets `PlayerSettings.Android.*` before building.
+Nothing is printed except the keystore path and the alias.
+
+### Creating a keystore
+
+Once per game - keep the file and its passwords backed up, losing them
+means losing the ability to update the app on Play:
+
+```
+keytool -genkeypair -v -keystore Keystores/com.pearz.meowpuzzle.keystore \
+  -alias pearz -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Name the file after the package so the resolver finds it, commit it, push.
+If the project `.gitignore` ignores `*.keystore`, the UMP block re-includes
+`Keystores/` - check with `git check-ignore -v Keystores/<file>`.
+
+If Google Play App Signing is enabled for the app, this key is the *upload*
+key; Google re-signs with the app signing key.
 
 ## Google Drive
 

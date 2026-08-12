@@ -18,6 +18,9 @@ public static class JenkinsBuild
     {
         Prepare(directory);
 
+        // An AAB goes to Google Play, so it must be signed for real.
+        ConfigureSigning(appBundle);
+
         EditorUserBuildSettings.buildAppBundle = appBundle;
 
         string output = directory + "/" + ArtifactName() + extension;
@@ -55,6 +58,62 @@ public static class JenkinsBuild
         WriteBuildInfo(output);
 
         UnityEngine.Debug.Log("[UMP] iOS Xcode project: " + output);
+    }
+
+    // Unity never generates a release keystore. Without one it signs
+    // with the Android debug key (~/.android/debug.keystore, created
+    // automatically), which is fine for a test APK but rejected by
+    // Google Play. Keystore + passwords come from Jenkins credentials
+    // because Unity does not store passwords in the project.
+    private static void ConfigureSigning(bool required)
+    {
+        string keystore = Env("UMP_ANDROID_KEYSTORE");
+        string keystorePass = Env("UMP_ANDROID_KEYSTORE_PASS");
+        string alias = Env("UMP_ANDROID_KEY_ALIAS");
+        string aliasPass = Env("UMP_ANDROID_KEY_ALIAS_PASS");
+
+        if (keystore.Length == 0)
+        {
+            if (required)
+                throw new Exception(
+                    "No release keystore for this project. Add " +
+                    "<applicationIdentifier>.keystore and " +
+                    "<applicationIdentifier>.properties to the keystore store " +
+                    "on the build machine (~/.pearz/keystores by default, see " +
+                    "Jenkins/resolve_keystore.sh), or bind the " +
+                    "UMP_ANDROID_KEYSTORE credentials in the job. " +
+                    "Google Play rejects an AAB signed with the debug key.");
+
+            UnityEngine.Debug.LogWarning(
+                "[UMP] No keystore configured - signing with the Android debug key.");
+
+            PlayerSettings.Android.useCustomKeystore = false;
+            return;
+        }
+
+        if (!File.Exists(keystore))
+            throw new Exception("Keystore not found: " + keystore);
+
+        if (keystorePass.Length == 0 || alias.Length == 0 || aliasPass.Length == 0)
+            throw new Exception(
+                "Keystore found but UMP_ANDROID_KEYSTORE_PASS / " +
+                "UMP_ANDROID_KEY_ALIAS / UMP_ANDROID_KEY_ALIAS_PASS is empty.");
+
+        PlayerSettings.Android.useCustomKeystore = true;
+        PlayerSettings.Android.keystoreName = Path.GetFullPath(keystore);
+        PlayerSettings.Android.keystorePass = keystorePass;
+        PlayerSettings.Android.keyaliasName = alias;
+        PlayerSettings.Android.keyaliasPass = aliasPass;
+
+        UnityEngine.Debug.Log(
+            "[UMP] Signing with " + PlayerSettings.Android.keystoreName +
+            " (alias " + alias + ")");
+    }
+
+    private static string Env(string name)
+    {
+        string value = Environment.GetEnvironmentVariable(name);
+        return value == null ? "" : value.Trim();
     }
 
     // ProductName-v1.0.0, safe for a file name.

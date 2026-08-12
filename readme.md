@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.5.0
+# UMP Unity Mobile Pipeline 1.8.0
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -24,6 +24,28 @@ Jenkins credentials (Secret text):
 - UMP_DRIVE_FOLDER_ID
 - UMP_TELEGRAM_BOT_TOKEN
 - UMP_TELEGRAM_CHAT_ID
+
+Android signing needs no credential: commit the key as
+`Keystores/<package-name>.keystore` + `.properties` in the game repo
+(see JENKINS_SETUP.md).
+
+## 1.8.0
+- Keystores are read from `Keystores/<package-name>.keystore` in the game
+  repo first, then from `~/.pearz/keystores`, then from job credentials.
+  A new project only needs a git push.
+
+## 1.7.0
+- Keystores are resolved per project from `~/.pearz/keystores` by
+  applicationIdentifier, so several games share one Jenkins without one
+  set of credentials each. Jenkins credentials still override it.
+
+## 1.6.0
+- Android release signing from Jenkins credentials
+  (`UMP_ANDROID_KEYSTORE` + pass/alias). Unity never creates a release
+  keystore and does not keep passwords in the project, so a batchmode
+  build cannot sign without them. The AAB build now fails instead of
+  silently producing a debug-signed bundle Google Play would reject;
+  the test APK still falls back to the debug key.
 
 ## 1.5.0
 - Builds start on push: `pollSCM` trigger in the Jenkinsfile, plus
