@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.11.1
+# UMP Unity Mobile Pipeline 1.11.2
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -28,6 +28,11 @@ Jenkins credentials (Secret text):
 Android signing needs no credential: commit the key as
 `Keystores/<package-name>.keystore` + `.properties` in the game repo
 (see JENKINS_SETUP.md).
+
+## 1.11.2
+- Pick the `Unity-iPhone` scheme instead of the first one listed.
+  `GameAssembly` sorts first and only builds the IL2CPP static library,
+  so the install stage found no `.app`. Same fix in `archive_ios.sh`.
 
 ## 1.11.0
 - `release/ios-test` now really installs on the device attached to the

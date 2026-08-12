@@ -39,12 +39,30 @@ fi
 # Scheme
 # ------------------------------------------------------------
 
+#
+# A Unity project ships several schemes - GameAssembly and
+# UnityFramework are libraries and never produce a .app, so
+# picking the first one in the list builds the wrong thing.
+#
+
 SCHEME="${IOS_SCHEME:-}"
 
 if [ -z "$SCHEME" ]; then
 
-    SCHEME="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
-        | awk '/Schemes:/ {found=1; next} found && NF {print $1; exit}')"
+    SCHEMES="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
+        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {
+            gsub(/^[ \t]+|[ \t]+$/, ""); print }')"
+
+    if echo "$SCHEMES" | grep -qx "Unity-iPhone"; then
+
+        SCHEME="Unity-iPhone"
+
+    else
+
+        SCHEME="$(echo "$SCHEMES" \
+            | grep -vxE "GameAssembly|UnityFramework|Pods-.*" \
+            | head -n 1 || true)"
+    fi
 fi
 
 [ -n "$SCHEME" ] || SCHEME="Unity-iPhone"
@@ -170,8 +188,16 @@ APP="$(find "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" \
     2>/dev/null | head -n 1 || true)"
 
 if [ -z "$APP" ]; then
+
     echo "[PEARZ] ERROR: built .app not found under"
     echo "$DERIVED/Build/Products/$CONFIGURATION-iphoneos"
+    echo "[PEARZ] Scheme '$SCHEME' produced:"
+
+    ls -1 "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" 2>/dev/null || true
+
+    echo "[PEARZ] A library-only scheme (GameAssembly, UnityFramework)"
+    echo "[PEARZ] builds no app. Set IOS_SCHEME to the app scheme."
+
     exit 1
 fi
 

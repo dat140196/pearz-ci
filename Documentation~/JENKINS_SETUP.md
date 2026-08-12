@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.11.1
+# UMP Jenkins Setup 1.11.2
 
 ## Install / sync
 

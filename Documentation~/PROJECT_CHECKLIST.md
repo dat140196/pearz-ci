@@ -1,4 +1,4 @@
-# UMP 1.11.1 Checklist
+# UMP 1.11.2 Checklist
 - [ ] Install UMP by Git URL
 - [ ] Open the project once (files sync automatically; Pearz > SetupJenkin forces it)
 - [ ] Commit the generated Jenkinsfile + Jenkins/ folder

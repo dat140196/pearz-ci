@@ -16,12 +16,27 @@ cd "$IOS_PATH"
 # from the generated Xcode project.
 # ------------------------------------------------------------
 
+# GameAssembly and UnityFramework are library schemes and
+# archive into something that cannot be exported as an ipa.
+
 SCHEME="${IOS_SCHEME:-}"
 
 if [ -z "$SCHEME" ]; then
 
-    SCHEME="$(xcodebuild -list -project Unity-iPhone.xcodeproj 2>/dev/null \
-        | awk '/Schemes:/ {found=1; next} found && NF {print $1; exit}')"
+    SCHEMES="$(xcodebuild -list -project Unity-iPhone.xcodeproj 2>/dev/null \
+        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {
+            gsub(/^[ \t]+|[ \t]+$/, ""); print }')"
+
+    if echo "$SCHEMES" | grep -qx "Unity-iPhone"; then
+
+        SCHEME="Unity-iPhone"
+
+    else
+
+        SCHEME="$(echo "$SCHEMES" \
+            | grep -vxE "GameAssembly|UnityFramework|Pods-.*" \
+            | head -n 1 || true)"
+    fi
 fi
 
 if [ -z "$SCHEME" ]; then
