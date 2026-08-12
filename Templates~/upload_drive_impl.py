@@ -26,6 +26,11 @@
 #   JenkinsBuild), or UMP_DRIVE_GAME_NAME, or JOB_NAME.
 #   UMP_DRIVE_SUBPATH overrides the whole sub path.
 #   UMP_DRIVE_SUBPATH="" uploads straight into the root folder.
+#
+#   A file with the same name in the same folder is overwritten
+#   (new revision, same id and link). Older duplicates left by
+#   previous builds are moved to the trash unless
+#   UMP_DRIVE_KEEP_DUPLICATES=1.
 # ============================================================
 
 import os
@@ -376,26 +381,163 @@ def quota_help(using_service_account, info):
         )
 
 
-def start_session(access_token, folder_id, file_name, file_size):
+def find_files(access_token, folder_id, name):
 
-    metadata = {
-        "name": file_name,
-        "parents": [folder_id]
-    }
+    query = (
+        "name = '" + escape_query(name) + "' and "
+        "'" + escape_query(folder_id) + "' in parents and "
+        "trashed = false"
+    )
 
     url = (
-        "https://www.googleapis.com/upload/drive/v3/files?" +
+        "https://www.googleapis.com/drive/v3/files?" +
         urllib.parse.urlencode({
-            "uploadType": "resumable",
+            "q": query,
+            "fields": "files(id,name,modifiedTime)",
+            "orderBy": "modifiedTime desc",
+            "pageSize": "100",
             "supportsAllDrives": "true",
-            "fields": "id,name,webViewLink"
+            "includeItemsFromAllDrives": "true",
+            "corpora": "allDrives"
         })
     )
 
     request = urllib.request.Request(
         url,
+        headers={
+            "Authorization": "Bearer " + access_token
+        }
+    )
+
+    try:
+
+        with http(request) as response:
+            return json.loads(response.read().decode()).get("files", [])
+
+    except urllib.error.HTTPError as e:
+
+        log(
+            "WARNING: cannot list existing files "
+            "(HTTP " + str(e.code) + "). Uploading as a new file."
+        )
+
+        return []
+
+
+def trash_file(access_token, file_id):
+
+    url = (
+        "https://www.googleapis.com/drive/v3/files/" +
+        urllib.parse.quote(file_id) +
+        "?" +
+        urllib.parse.urlencode({"supportsAllDrives": "true"})
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"trashed": True}).encode(),
+        method="PATCH",
+        headers={
+
+            "Authorization":
+                "Bearer " + access_token,
+
+            "Content-Type":
+                "application/json; charset=UTF-8"
+        }
+    )
+
+    with http(request) as response:
+        response.read()
+
+
+# Same name in the same folder = same build. Overwrite it instead of
+# piling up copies; the Drive link stays valid for whoever has it.
+def replace_target(access_token, folder_id, file_name):
+
+    existing = find_files(access_token, folder_id, file_name)
+
+    if not existing:
+        return None
+
+    target = existing[0]["id"]
+
+    log("Existing file found - uploading a new revision.")
+
+    extras = existing[1:]
+
+    if not extras:
+        return target
+
+    if os.environ.get("UMP_DRIVE_KEEP_DUPLICATES", "").strip() == "1":
+
+        log(
+            "Leaving " + str(len(extras)) +
+            " older duplicate(s) in place."
+        )
+
+        return target
+
+    for duplicate in extras:
+
+        try:
+
+            trash_file(access_token, duplicate["id"])
+
+            log("Moved older duplicate to trash: " + duplicate["id"])
+
+        except urllib.error.HTTPError as e:
+
+            log(
+                "WARNING: cannot trash duplicate " +
+                duplicate["id"] + " (HTTP " + str(e.code) + ")."
+            )
+
+    return target
+
+
+def start_session(access_token, folder_id, file_name, file_size, file_id):
+
+    if file_id:
+
+        # Updating keeps the same file id, so the shared link and
+        # the Drive history survive.
+        metadata = {"name": file_name}
+
+        url = (
+            "https://www.googleapis.com/upload/drive/v3/files/" +
+            urllib.parse.quote(file_id) + "?" +
+            urllib.parse.urlencode({
+                "uploadType": "resumable",
+                "supportsAllDrives": "true",
+                "fields": "id,name,webViewLink"
+            })
+        )
+
+        method = "PATCH"
+
+    else:
+
+        metadata = {
+            "name": file_name,
+            "parents": [folder_id]
+        }
+
+        url = (
+            "https://www.googleapis.com/upload/drive/v3/files?" +
+            urllib.parse.urlencode({
+                "uploadType": "resumable",
+                "supportsAllDrives": "true",
+                "fields": "id,name,webViewLink"
+            })
+        )
+
+        method = "POST"
+
+    request = urllib.request.Request(
+        url,
         data=json.dumps(metadata).encode(),
-        method="POST",
+        method=method,
         headers={
 
             "Authorization":
@@ -501,7 +643,8 @@ def upload(access_token, folder_id, file_path, using_service_account, info):
             access_token,
             folder_id,
             file_name,
-            file_size
+            file_size,
+            replace_target(access_token, folder_id, file_name)
         )
 
         result = send_chunks(

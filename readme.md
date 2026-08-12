@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.9.0
+# UMP Unity Mobile Pipeline 1.10.0
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -28,6 +28,12 @@ Jenkins credentials (Secret text):
 Android signing needs no credential: commit the key as
 `Keystores/<package-name>.keystore` + `.properties` in the game repo
 (see JENKINS_SETUP.md).
+
+## 1.10.0
+- Drive upload overwrites a file of the same name in the same folder
+  (new revision, same id and link) instead of adding another copy, and
+  trashes duplicates left by earlier builds
+  (`UMP_DRIVE_KEEP_DUPLICATES=1` to keep them).
 
 ## 1.9.0
 - Keystore passwords from a `.properties` file are passed to Unity in a

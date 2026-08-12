@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.9.0
+# UMP Jenkins Setup 1.10.0
 
 ## Install / sync
 
@@ -272,6 +272,13 @@ Folders are created on first use and reused afterwards. The game folder
 name is the Player Settings product name; override it with
 `UMP_DRIVE_GAME_NAME`, or replace the whole sub path with
 `UMP_DRIVE_SUBPATH` (set it empty to upload into the root folder).
+
+**Same name = overwrite.** Rebuilding without bumping the version uploads
+a new revision of the existing file instead of a second copy, so the Drive
+link you already gave to testers keeps working and always points at the
+latest build. Duplicates left by earlier builds are moved to the trash;
+set `UMP_DRIVE_KEEP_DUPLICATES=1` to leave them alone. Bumping the version
+in Player Settings still produces a new file, because the name changes.
 
 Credentials (Secret text):
 - `UMP_DRIVE_SERVICE_ACCOUNT_JSON` = the **contents** of the service-account JSON (a path to a JSON file on the Mac also works)
