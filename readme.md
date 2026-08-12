@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.4.0
+# UMP Unity Mobile Pipeline 1.5.0
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -24,6 +24,11 @@ Jenkins credentials (Secret text):
 - UMP_DRIVE_FOLDER_ID
 - UMP_TELEGRAM_BOT_TOKEN
 - UMP_TELEGRAM_CHAT_ID
+
+## 1.5.0
+- Builds start on push: `pollSCM` trigger in the Jenkinsfile, plus
+  `disableConcurrentBuilds()` and log rotation. Non-release branches end
+  as NOT_BUILT instead of failing, with no Telegram spam.
 
 ## 1.4.0
 - Files sync automatically on install/update (signature of the package

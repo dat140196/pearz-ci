@@ -2,6 +2,30 @@ pipeline {
 
     agent any
 
+    options {
+
+        // A push while a build is running must queue, never start a
+        // second Unity on the same workspace.
+        disableConcurrentBuilds()
+
+        // Builds are 80 MB+, do not fill the Mac disk.
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '15',
+                artifactNumToKeepStr: '3'
+            )
+        )
+    }
+
+    triggers {
+
+        // Auto build on push. The webhook from the Git host triggers
+        // instantly; this polling is the fallback when no webhook is
+        // configured. Polling only starts after the first build of
+        // the branch.
+        pollSCM('H/2 * * * *')
+    }
+
     stages {
 
         // ====================================================
@@ -19,16 +43,26 @@ pipeline {
                         'release/ios'
                     ]
 
+                    // Every branch is built automatically on push, so
+                    // a non-release branch is skipped quietly instead
+                    // of failing the build.
                     if (!allowedBranches.contains(env.BRANCH_NAME)) {
-                        error(
-                            "Unsupported PEARZ branch: ${env.BRANCH_NAME}"
-                        )
-                    }
 
-                    echo "========================================"
-                    echo "[PEARZ] BUILD"
-                    echo "[PEARZ] Branch: ${env.BRANCH_NAME}"
-                    echo "========================================"
+                        echo "========================================"
+                        echo "[PEARZ] Branch not handled by UMP:"
+                        echo "[PEARZ] ${env.BRANCH_NAME}"
+                        echo "[PEARZ] Nothing to build."
+                        echo "========================================"
+
+                        currentBuild.result = 'NOT_BUILT'
+
+                    } else {
+
+                        echo "========================================"
+                        echo "[PEARZ] BUILD"
+                        echo "[PEARZ] Branch: ${env.BRANCH_NAME}"
+                        echo "========================================"
+                    }
                 }
             }
         }
@@ -297,6 +331,17 @@ pipeline {
         always {
 
             script {
+
+                // Pushes to other branches build automatically too;
+                // stay silent for them.
+                def branch = env.BRANCH_NAME ?: ''
+
+                if (!branch.startsWith('release/')) {
+
+                    echo "[PEARZ] ${branch}: no notification, no artifact."
+
+                    return
+                }
 
                 def artifact = ''
 

@@ -1,9 +1,10 @@
-# UMP 1.4.0 Checklist
+# UMP 1.5.0 Checklist
 - [ ] Install UMP by Git URL
 - [ ] Open the project once (files sync automatically; Pearz > SetupJenkin forces it)
 - [ ] Commit the generated Jenkinsfile + Jenkins/ folder
 - [ ] Enable all required Build Settings scenes
-- [ ] Configure Jenkins Multibranch Pipeline + webhook
+- [ ] Configure Jenkins Multibranch Pipeline
+- [ ] Set Scan Multibranch Pipeline Triggers = 1 minute (and a webhook if possible)
 - [ ] Configure Telegram token/chat ID
 - [ ] Create the destination folder in a **Shared Drive** (service accounts have no storage quota)
 - [ ] Add the service-account email as Content manager on that Shared Drive

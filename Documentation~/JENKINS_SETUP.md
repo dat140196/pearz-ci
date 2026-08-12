@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.4.0
+# UMP Jenkins Setup 1.5.0
 
 ## Install / sync
 
@@ -19,6 +19,79 @@ Branches:
 - release/ios -> Archive/Export + TestFlight
 
 Create a Multibranch Pipeline, connect the Git repository, use Jenkinsfile at project root, and optionally filter `release/(android|android-test|ios-test|ios)`.
+
+## Build on push (no Build Now)
+
+The Jenkinsfile declares `triggers { pollSCM('H/2 * * * *') }`, so once a
+branch has been built one time, Jenkins picks up new commits by itself
+within ~2 minutes. Nothing else is required - but a webhook makes it
+instant, and branch discovery still needs one of the two settings below.
+
+**1. Branch discovery (required when there is no webhook)**
+
+Polling only watches branches Jenkins already knows, so a brand-new branch
+is never noticed. In the Multibranch job -> Configure -> *Scan Multibranch
+Pipeline Triggers* -> tick **Periodically if not otherwise run** and set
+`1 minute`.
+
+With a working webhook on the GitHub branch source this is not needed -
+the push event indexes the new branch by itself. Keep it at `1 day` as a
+safety net.
+
+**2. Webhook (makes it instant)**
+
+The webhook alone is not enough: the Jenkins side must be able to receive
+it. There is no *GitHub hook trigger for GITScm polling* checkbox in a
+Multibranch job - that option only exists on freestyle/single pipeline
+jobs. A Multibranch job reacts to a push event only through its
+**Branch Source**.
+
+GitHub, payload URL `http://<jenkins>/github-webhook/`, content type
+`application/json`, event *Just the push event*:
+
+1. Manage Jenkins -> System -> **Jenkins URL** = the URL GitHub can reach.
+   It is also the link Telegram sends.
+2. Job -> Configure -> **Branch Sources** must be **GitHub**, not the plain
+   **Git** source. `/github-webhook/` is ignored by the plain Git source.
+   Use an HTTPS repo URL plus a personal access token credential.
+3. Behaviours: *Discover branches*. Optional *Filter by name (with regular
+   expression)*: `release/(android|android-test|ios-test|ios)`.
+4. Save, then **Scan Repository Now** once. Branch jobs only exist after
+   the first scan, and a Jenkinsfile trigger is only registered after the
+   branch has been built once.
+5. Push, then check GitHub -> Settings -> Webhooks -> *Recent Deliveries*.
+   `200`/`302` means Jenkins received it. A timeout or connection error
+   means github.com cannot reach the Mac (LAN only / no port forwarding) -
+   expose it through a tunnel or keep relying on `pollSCM`.
+
+Already stuck with the plain **Git** branch source? Two options that work
+without switching:
+
+- Git plugin endpoint: `http://<jenkins>/git/notifyCommit?url=<repo-url>`
+  (the URL must match the one configured in the job, character for
+  character).
+- Install *Multibranch Scan Webhook Trigger*, set a token in the job, and
+  call `http://<jenkins>/multibranch-webhook-trigger/invoke?token=<token>`.
+
+Other hosts: GitLab -> `http://<jenkins>/project/<job-name>`,
+Bitbucket -> `http://<jenkins>/bitbucket-hook/`.
+
+Once deliveries return 200 you can drop the `triggers { pollSCM(...) }`
+block from the Jenkinsfile; keeping it costs one `git ls-remote` every two
+minutes and covers you when a delivery is lost.
+
+**Behaviour**
+
+- Push to `release/android-test` -> APK build starts on its own.
+- Push to any other branch (`main`, feature branches) -> the build ends
+  immediately as `NOT_BUILT`, with no Telegram message and no artifact.
+  Set the branch filter in the job to skip indexing them entirely.
+- Two quick pushes never run two Unity instances on the same workspace:
+  `disableConcurrentBuilds()` queues the second one. That is per branch -
+  if you also want to stop `release/android` and `release/ios` from
+  building at the same time on one Mac, set the agent's *number of
+  executors* to 1.
+- Only the last 15 builds and the artifacts of the last 3 are kept.
 
 ## Unity path
 Nothing to configure. `Jenkins/find_unity.sh` resolves the editor in this order:
