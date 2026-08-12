@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.11.2
+# UMP Unity Mobile Pipeline 1.12.0
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -28,6 +28,13 @@ Jenkins credentials (Secret text):
 Android signing needs no credential: commit the key as
 `Keystores/<package-name>.keystore` + `.properties` in the game repo
 (see JENKINS_SETUP.md).
+
+## 1.12.0
+- The iOS Xcode project is exported to `Builds/iOS/<Game name>/`, and the
+  scripts find the `.xcodeproj` instead of assuming a fixed path.
+- The signing team is taken from `UMP_IOS_TEAM_ID`, then Player Settings,
+  then the Apple Development certificate on the Mac. Missing team now
+  stops the stage with instructions.
 
 ## 1.11.2
 - Pick the `Unity-iPhone` scheme instead of the first one listed.

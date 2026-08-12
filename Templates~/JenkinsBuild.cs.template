@@ -42,7 +42,10 @@ public static class JenkinsBuild
 
     public static void BuildIOS()
     {
-        string output = "Builds/iOS";
+        // One folder per game so several projects never share an
+        // Xcode project path on the same build machine.
+        string output = "Builds/iOS/" + Sanitize(PlayerSettings.productName);
+
         Prepare(output);
 
         var options = new BuildPlayerOptions

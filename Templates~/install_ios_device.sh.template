@@ -24,16 +24,31 @@ if [ -z "${WORKSPACE:-}" ]; then
     exit 1
 fi
 
-PROJECT="$WORKSPACE/Builds/iOS/Unity-iPhone.xcodeproj"
-DERIVED="$WORKSPACE/Builds/iOSDerived"
 CONFIGURATION="${UMP_IOS_CONFIGURATION:-Release}"
 
-if [ ! -d "$PROJECT" ]; then
-    echo "[PEARZ] ERROR: Xcode project not found:"
-    echo "$PROJECT"
+# Unity exports to Builds/iOS/<Game name>, so look the project up
+# instead of assuming a fixed path.
+PROJECT="${UMP_IOS_PROJECT:-}"
+
+if [ -z "$PROJECT" ]; then
+
+    PROJECT="$(find "$WORKSPACE/Builds/iOS" \
+        -maxdepth 2 \
+        -type d \
+        -name "*.xcodeproj" \
+        2>/dev/null | head -n 1 || true)"
+fi
+
+if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
+    echo "[PEARZ] ERROR: no Xcode project under"
+    echo "$WORKSPACE/Builds/iOS"
     echo "[PEARZ] Run the Unity iOS build first."
     exit 1
 fi
+
+DERIVED="$WORKSPACE/Builds/iOSDerived"
+
+echo "[PEARZ] Project      : $PROJECT"
 
 # ------------------------------------------------------------
 # Scheme
@@ -138,39 +153,96 @@ BUILD_ARGS=(
     -allowProvisioningUpdates
 )
 
-if [ -n "${UMP_IOS_TEAM_ID:-}" ]; then
+# Reads the team out of the signing certificates installed on this
+# Mac. The team id is the OU of an Apple Development certificate.
+detect_team() {
 
-    echo "[PEARZ] Team         : $UMP_IOS_TEAM_ID (UMP_IOS_TEAM_ID)"
+    local names
+    local team
+    local found=""
 
-    BUILD_ARGS+=(
-        "DEVELOPMENT_TEAM=$UMP_IOS_TEAM_ID"
-        "CODE_SIGN_STYLE=Automatic"
-    )
+    names="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Apple Development[^"]*\)".*/\1/p
+                  s/.*"\(iPhone Developer[^"]*\)".*/\1/p')"
 
-else
+    [ -n "$names" ] || return 0
 
-    # Unity writes the team from Player Settings into the project.
-    # Say so early rather than let xcodebuild fail on signing.
-    PROJECT_TEAM="$(xcodebuild -showBuildSettings \
+    while IFS= read -r name; do
+
+        [ -n "$name" ] || continue
+
+        team="$(security find-certificate -c "$name" -p 2>/dev/null \
+            | openssl x509 -noout -subject 2>/dev/null \
+            | tr '/,' '\n\n' \
+            | sed -n 's/^[[:space:]]*OU[[:space:]]*=[[:space:]]*\([A-Z0-9]\{10\}\).*/\1/p' \
+            | head -n 1)"
+
+        [ -n "$team" ] && found="$found$team
+"
+    done <<INNER
+$names
+INNER
+
+    echo "$found" | grep -v '^$' | sort -u
+}
+
+TEAM="${UMP_IOS_TEAM_ID:-}"
+TEAM_SOURCE="UMP_IOS_TEAM_ID"
+
+if [ -z "$TEAM" ]; then
+
+    # Unity writes the Player Settings team into the project.
+    TEAM="$(xcodebuild -showBuildSettings \
         -project "$PROJECT" \
         -scheme "$SCHEME" 2>/dev/null \
         | awk -F' = ' '/ DEVELOPMENT_TEAM = / {print $2; exit}' \
         | tr -d ' \r' || true)"
 
-    if [ -n "$PROJECT_TEAM" ]; then
+    TEAM_SOURCE="Player Settings"
+fi
 
-        echo "[PEARZ] Team         : $PROJECT_TEAM (Player Settings)"
+if [ -z "$TEAM" ]; then
 
-    else
+    DETECTED="$(detect_team || true)"
 
-        echo "[PEARZ] WARNING: no signing team in the Xcode project."
-        echo "[PEARZ] Set it in Unity: Player Settings -> iOS ->"
-        echo "[PEARZ] Identification -> Signing Team ID, and tick"
-        echo "[PEARZ] Automatically Sign. A free Apple ID works:"
-        echo "[PEARZ] sign in to Xcode once on this Mac, the personal"
-        echo "[PEARZ] team lets the app run 7 days on the device."
-        echo "[PEARZ] Or set UMP_IOS_TEAM_ID in Jenkins."
+    COUNT="$(echo "$DETECTED" | grep -c . || true)"
+
+    if [ "$COUNT" -eq 1 ]; then
+
+        TEAM="$DETECTED"
+        TEAM_SOURCE="signing certificate on this Mac"
+
+    elif [ "$COUNT" -gt 1 ]; then
+
+        echo "[PEARZ] Several signing teams on this Mac:"
+        echo "$DETECTED"
+        echo "[PEARZ] Set UMP_IOS_TEAM_ID or Player Settings ->"
+        echo "[PEARZ] iOS -> Signing Team ID to pick one."
     fi
+fi
+
+if [ -n "$TEAM" ]; then
+
+    echo "[PEARZ] Team         : $TEAM ($TEAM_SOURCE)"
+
+    BUILD_ARGS+=(
+        "DEVELOPMENT_TEAM=$TEAM"
+        "CODE_SIGN_STYLE=Automatic"
+    )
+
+else
+
+    echo "[PEARZ] ERROR: no signing team, xcodebuild cannot sign."
+    echo "[PEARZ] No Apple Development certificate on this Mac and"
+    echo "[PEARZ] no team in Player Settings."
+    echo "[PEARZ] Fix on the Mac: Xcode -> Settings -> Accounts -> +"
+    echo "[PEARZ] and sign in with any Apple ID. A free account gives"
+    echo "[PEARZ] a Personal Team; the app then runs 7 days on the"
+    echo "[PEARZ] device. Re-run afterwards."
+    echo "[PEARZ] Or set UMP_IOS_TEAM_ID in Jenkins, or fill"
+    echo "[PEARZ] Player Settings -> iOS -> Signing Team ID."
+
+    exit 1
 fi
 
 rm -rf "$DERIVED"

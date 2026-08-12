@@ -1,10 +1,43 @@
 #!/bin/bash
 set -euo pipefail
 
-IOS_PATH="$WORKSPACE/Builds/iOS"
-ARCHIVE="$WORKSPACE/Builds/iOSArchive/Game.xcarchive"
 EXPORT="$WORKSPACE/Builds/iOSExport"
 OPTIONS="$WORKSPACE/Jenkins/ExportOptions.plist"
+INFO="$WORKSPACE/Builds/ump_build_info.txt"
+
+# Unity exports to Builds/iOS/<Game name>.
+PROJECT="${UMP_IOS_PROJECT:-}"
+
+if [ -z "$PROJECT" ]; then
+
+    PROJECT="$(find "$WORKSPACE/Builds/iOS" \
+        -maxdepth 2 \
+        -type d \
+        -name "*.xcodeproj" \
+        2>/dev/null | head -n 1 || true)"
+fi
+
+if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
+    echo "[PEARZ] ERROR: no Xcode project under"
+    echo "$WORKSPACE/Builds/iOS"
+    exit 1
+fi
+
+IOS_PATH="$(dirname "$PROJECT")"
+
+NAME="Game"
+
+if [ -f "$INFO" ]; then
+
+    FROM_INFO="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' \
+        "$INFO" | tr -d '\r')"
+
+    [ -n "$FROM_INFO" ] && NAME="$FROM_INFO"
+fi
+
+ARCHIVE="$WORKSPACE/Builds/iOSArchive/$NAME.xcarchive"
+
+echo "[PEARZ] Project: $PROJECT"
 
 rm -rf "$WORKSPACE/Builds/iOSArchive" "$EXPORT"
 mkdir -p "$(dirname "$ARCHIVE")" "$EXPORT"
@@ -23,7 +56,7 @@ SCHEME="${IOS_SCHEME:-}"
 
 if [ -z "$SCHEME" ]; then
 
-    SCHEMES="$(xcodebuild -list -project Unity-iPhone.xcodeproj 2>/dev/null \
+    SCHEMES="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
         | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {
             gsub(/^[ \t]+|[ \t]+$/, ""); print }')"
 
@@ -46,7 +79,7 @@ fi
 echo "[PEARZ] Xcode scheme: $SCHEME"
 
 xcodebuild \
-    -project Unity-iPhone.xcodeproj \
+    -project "$PROJECT" \
     -scheme "$SCHEME" \
     -configuration Release \
     -archivePath "$ARCHIVE" \

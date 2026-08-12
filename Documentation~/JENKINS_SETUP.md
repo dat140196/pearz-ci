@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.11.2
+# UMP Jenkins Setup 1.12.0
 
 ## Install / sync
 
@@ -118,6 +118,13 @@ Artifacts are named from Player Settings: `ProductName-vBundleVersion`.
 - `Builds/iOSExport/MeowPuzzle-v1.0.0.ipa`
 
 Spaces and characters that are illegal in file names are stripped.
+
+The iOS Xcode project is exported to `Builds/iOS/<Game name>/` (e.g.
+`Builds/iOS/MeowPuzzle/Unity-iPhone.xcodeproj`) so two projects never
+share a path on the same machine. The scripts locate the `.xcodeproj`
+under `Builds/iOS` instead of assuming a fixed path; `UMP_IOS_PROJECT`
+overrides it. The archive is named `Builds/iOSArchive/<Game name>.xcarchive`.
+
 `JenkinsBuild` also writes `Builds/ump_build_info.txt`
 (`PRODUCT_NAME`, `PRODUCT_NAME_SAFE`, `VERSION`, `BUILD_NUMBER`, `ARTIFACT`),
 which the shell scripts read. Bump the version in Player Settings to get a
@@ -345,28 +352,33 @@ Requirements on the Mac:
 ### Signing team
 
 The Team ID is a 10-character string like `A1B2C3D4E5`. It is **not a
-secret** - it is embedded in every build - so it belongs in *Manage Jenkins
--> System -> Global properties -> Environment variables*, **not** in
-Credentials. A credential would not even reach the script: the Jenkinsfile
-never binds it.
+secret** - it is embedded in every build - so if you set it in Jenkins it
+belongs in *Manage Jenkins -> System -> Global properties -> Environment
+variables*, **not** in Credentials. A credential would not even reach the
+script: the Jenkinsfile never binds it.
 
-The better place is the project itself: *Player Settings -> iOS ->
-Identification -> Signing Team ID* with *Automatically Sign* ticked. Unity
-writes it into the Xcode project, the value travels with the repo like the
-Android keystore, and `UMP_IOS_TEAM_ID` stays unset. Use the env var only
-to override every project at once.
+Resolution order:
+
+1. `UMP_IOS_TEAM_ID`
+2. *Player Settings -> iOS -> Identification -> Signing Team ID*, which
+   Unity writes into the Xcode project. Ticking *Automatically Sign* alone
+   is **not enough** - an empty team field fails with
+   `Signing for "Unity-iPhone" requires a development team`.
+3. The signing certificate installed on the Mac. The team is read from the
+   `OU` of an *Apple Development* certificate, so in practice nothing has
+   to be configured at all. If the Mac holds certificates for several
+   teams, the script lists them and stops rather than guessing.
+
+Nothing found at all stops the stage immediately with instructions instead
+of handing xcodebuild a project it cannot sign.
 
 **No paid Apple Developer account?** A free Apple ID is enough for
 `release/ios-test`: sign in to Xcode once on the Jenkins Mac (Settings ->
-Accounts -> +), which creates a *Personal Team*. Its Team ID is shown in
-Xcode -> Project -> Signing & Capabilities after selecting the team; put
-that in Player Settings. Limits: the app stops running after **7 days**,
-max 3 apps per device, and no push notifications, IAP or Game Center. Good
-enough to hand a build to a tester, not for TestFlight (`release/ios`
-needs a paid account).
-
-The install script prints which team it is using, and warns before
-`xcodebuild` runs when the project has none.
+Accounts -> +), which creates a *Personal Team* and installs the
+certificate that step 3 picks up. Limits: the app stops running after
+**7 days**, max 3 apps per device, and no push notifications, IAP or Game
+Center. Good enough to hand a build to a tester, not for TestFlight
+(`release/ios` needs a paid account).
 
 Optional Jenkins env vars:
 
