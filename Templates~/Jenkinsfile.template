@@ -165,7 +165,17 @@ pipeline {
         // GOOGLE DRIVE UPLOAD
         // ====================================================
 
+        // Android only: iOS ships through TestFlight / direct
+        // install, so no Drive copy is needed there.
+
         stage('Drive Upload') {
+
+            when {
+                expression {
+                    env.BRANCH_NAME == 'release/android' ||
+                    env.BRANCH_NAME == 'release/android-test'
+                }
+            }
 
             steps {
 
@@ -179,8 +189,15 @@ pipeline {
 
                     if (env.BRANCH_NAME == 'release/android') {
 
-                        artifact =
-                            'Builds/Android/Game.aab'
+                        artifact = sh(
+                            script: '''
+                                find Builds/Android \
+                                -type f \
+                                -name "*.aab" \
+                                2>/dev/null | head -n 1 || true
+                            ''',
+                            returnStdout: true
+                        ).trim()
                     }
 
                     // ------------------------------------------------
@@ -189,22 +206,12 @@ pipeline {
 
                     if (env.BRANCH_NAME == 'release/android-test') {
 
-                        artifact =
-                            'Builds/AndroidTest/Game.apk'
-                    }
-
-                    // ------------------------------------------------
-                    // iOS IPA
-                    // ------------------------------------------------
-
-                    if (env.BRANCH_NAME == 'release/ios') {
-
                         artifact = sh(
                             script: '''
-                                find Builds/iOSExport \
+                                find Builds/AndroidTest \
                                 -type f \
-                                -name "*.ipa" \
-                                | head -n 1 || true
+                                -name "*.apk" \
+                                2>/dev/null | head -n 1 || true
                             ''',
                             returnStdout: true
                         ).trim()
@@ -293,55 +300,20 @@ pipeline {
 
                 def artifact = ''
 
-                // ------------------------------------------------
-                // Android AAB
-                // ------------------------------------------------
+                def found = sh(
+                    script: '''
+                        find Builds \
+                        -type f -name "*.aab" -o \
+                        -type f -name "*.apk" -o \
+                        -type f -name "*.ipa" \
+                        2>/dev/null | head -n 1 || true
+                    ''',
+                    returnStdout: true
+                ).trim()
 
-                if (env.BRANCH_NAME == 'release/android') {
+                if (found) {
 
-                    def path =
-                        "${env.WORKSPACE}/Builds/Android/Game.aab"
-
-                    if (fileExists(path)) {
-                        artifact = path
-                    }
-                }
-
-                // ------------------------------------------------
-                // Android APK
-                // ------------------------------------------------
-
-                if (env.BRANCH_NAME == 'release/android-test') {
-
-                    def path =
-                        "${env.WORKSPACE}/Builds/AndroidTest/Game.apk"
-
-                    if (fileExists(path)) {
-                        artifact = path
-                    }
-                }
-
-                // ------------------------------------------------
-                // iOS IPA
-                // ------------------------------------------------
-
-                if (env.BRANCH_NAME == 'release/ios') {
-
-                    def ipa = sh(
-                        script: '''
-                            find Builds/iOSExport \
-                            -type f \
-                            -name "*.ipa" \
-                            | head -n 1 || true
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    if (ipa) {
-
-                        artifact =
-                            "${env.WORKSPACE}/${ipa}"
-                    }
+                    artifact = "${env.WORKSPACE}/${found}"
                 }
 
                 def status =

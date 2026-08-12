@@ -1,6 +1,6 @@
-# UMP 1.2.0 Checklist
+# UMP 1.4.0 Checklist
 - [ ] Install UMP by Git URL
-- [ ] Run Tools > UMP > Setup / Sync Jenkins Files -> Sync UMP Files
+- [ ] Open the project once (files sync automatically; Pearz > SetupJenkin forces it)
 - [ ] Commit the generated Jenkinsfile + Jenkins/ folder
 - [ ] Enable all required Build Settings scenes
 - [ ] Configure Jenkins Multibranch Pipeline + webhook

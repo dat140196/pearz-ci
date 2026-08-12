@@ -1,10 +1,13 @@
-# UMP Unity Mobile Pipeline 1.2.0
+# UMP Unity Mobile Pipeline 1.4.0
 
 Install using Unity Package Manager -> Add package from Git URL.
 
-After import, use:
+The Jenkinsfile and the `Jenkins/` scripts are written into the project
+**automatically** when the package is installed or updated - nothing to click.
 
-Tools > UMP > Setup / Sync Jenkins Files -> **Sync UMP Files**
+To force a sync (e.g. after editing the generated files by hand):
+
+**Pearz > SetupJenkin** -> `Force Sync UMP Files`
 
 No Unity path to fill in: the build machine resolves Unity itself
 (`Jenkins/find_unity.sh`) from `ProjectSettings/ProjectVersion.txt`,
@@ -21,6 +24,25 @@ Jenkins credentials (Secret text):
 - UMP_DRIVE_FOLDER_ID
 - UMP_TELEGRAM_BOT_TOKEN
 - UMP_TELEGRAM_CHAT_ID
+
+## 1.4.0
+- Files sync automatically on install/update (signature of the package
+  version + templates is cached in `Library/UMP.sync`). Skipped in
+  batch mode so Jenkins builds never rewrite the workspace.
+- Menu moved to **Pearz > SetupJenkin**; the button is now a manual
+  fallback.
+- Unchanged files are no longer rewritten, so Unity does not reimport
+  `JenkinsBuild.cs` on every sync.
+
+## 1.3.0
+- Artifacts are named `ProductName-vVersion` from Player Settings
+  (e.g. `MeowPuzzle-v1.0.0.apk`).
+- Drive uploads go to `<root>/<Game name>/<APK|AAB>/`, folders created
+  automatically.
+- Drive upload runs on Android branches only; iOS uses TestFlight /
+  direct install.
+- `release/android` now really produces an AAB (`buildAppBundle` was
+  never enabled).
 
 ## 1.2.0
 - Drive upload uses resumable upload + `supportsAllDrives`, so it works

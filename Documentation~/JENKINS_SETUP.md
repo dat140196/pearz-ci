@@ -1,4 +1,16 @@
-# UMP Jenkins Setup 1.2.0
+# UMP Jenkins Setup 1.4.0
+
+## Install / sync
+
+Install the package from its Git URL. The Jenkinsfile, `Jenkins/*` scripts,
+`Assets/Editor/JenkinsBuild.cs` and the `.gitignore` block are written
+automatically the first time the editor loads the package, and again after
+every package update. The signature (package version + template contents) is
+cached in `Library/UMP.sync`; auto sync is skipped in batch mode so Jenkins
+builds never rewrite their own workspace.
+
+Force a sync from **Pearz > SetupJenkin** -> `Force Sync UMP Files`.
+Commit the generated files.
 
 Branches:
 - release/android -> AAB
@@ -23,7 +35,40 @@ Set Jenkins credentials (Secret text):
 
 Status is sent on both SUCCESS and FAILURE. If an artifact exists and is <=50 MB, the artifact is also sent as a Telegram document. Larger artifacts are still uploaded to Drive and Telegram receives the status.
 
+## Artifact names
+
+Artifacts are named from Player Settings: `ProductName-vBundleVersion`.
+`Meow Puzzle` + version `1.0.0` gives:
+
+- `Builds/AndroidTest/MeowPuzzle-v1.0.0.apk`
+- `Builds/Android/MeowPuzzle-v1.0.0.aab`
+- `Builds/iOSExport/MeowPuzzle-v1.0.0.ipa`
+
+Spaces and characters that are illegal in file names are stripped.
+`JenkinsBuild` also writes `Builds/ump_build_info.txt`
+(`PRODUCT_NAME`, `PRODUCT_NAME_SAFE`, `VERSION`, `BUILD_NUMBER`, `ARTIFACT`),
+which the shell scripts read. Bump the version in Player Settings to get a
+new file name - nothing in Jenkins has to change.
+
 ## Google Drive
+
+Android only. iOS goes to TestFlight (`release/ios`) or is installed
+straight onto the device from the Xcode project (`release/ios-test`), so
+the Drive stage is skipped on iOS branches.
+
+Layout inside the root folder:
+
+```
+<UMP_DRIVE_FOLDER_ID>/
+  Meow Puzzle/
+    APK/  MeowPuzzle-v1.0.0.apk
+    AAB/  MeowPuzzle-v1.0.0.aab
+```
+
+Folders are created on first use and reused afterwards. The game folder
+name is the Player Settings product name; override it with
+`UMP_DRIVE_GAME_NAME`, or replace the whole sub path with
+`UMP_DRIVE_SUBPATH` (set it empty to upload into the root folder).
 
 Credentials (Secret text):
 - `UMP_DRIVE_SERVICE_ACCOUNT_JSON` = the **contents** of the service-account JSON (a path to a JSON file on the Mac also works)
@@ -57,14 +102,14 @@ The upload then runs as that user and a normal My Drive folder works.
 
 **Option 3 - OAuth refresh token (personal Gmail, no Workspace)**
 
-Create an OAuth client (Desktop app), get a refresh token for scope `https://www.googleapis.com/auth/drive.file`, then set these Jenkins credentials instead of the service-account JSON:
+Create an OAuth client (Desktop app), get a refresh token for scope `https://www.googleapis.com/auth/drive` (the narrower `drive.file` scope cannot see folders it did not create, so the `Game/APK` lookup would fail), then set these Jenkins credentials instead of the service-account JSON:
 - `UMP_DRIVE_OAUTH_CLIENT_ID`
 - `UMP_DRIVE_OAUTH_CLIENT_SECRET`
 - `UMP_DRIVE_OAUTH_REFRESH_TOKEN`
 
 and bind them in the `Drive Upload` stage of the Jenkinsfile the same way the service-account credential is bound.
 
-Uploads use the Drive v3 resumable flow in 8 MB chunks with `supportsAllDrives=true`, so large APK/AAB/IPA files stream instead of being buffered whole. A failed Drive upload never fails the Jenkins build.
+Uploads use the Drive v3 resumable flow in 8 MB chunks with `supportsAllDrives=true`, so large APK/AAB files stream instead of being buffered whole. A failed Drive upload never fails the Jenkins build.
 
 ## iOS
 Configure Xcode signing on the Jenkins Mac and verify manual Archive/Export/Upload before CI. No Apple password is stored in UMP. The Xcode scheme is read from the generated project; set `IOS_SCHEME` in Jenkins only to override it.

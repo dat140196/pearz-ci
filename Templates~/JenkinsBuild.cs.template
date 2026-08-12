@@ -1,21 +1,39 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 
 public static class JenkinsBuild
 {
-    public static void BuildAndroidAab() => BuildAndroid("Builds/Android/Game.aab");
-    public static void BuildAndroidApk() => BuildAndroid("Builds/AndroidTest/Game.apk");
+    // Written next to the artifact so the Jenkins shell scripts
+    // know the product name / version without parsing Unity files.
+    private const string InfoFile = "Builds/ump_build_info.txt";
 
-    private static void BuildAndroid(string output)
+    public static void BuildAndroidAab() => BuildAndroid("Builds/Android", ".aab", true);
+    public static void BuildAndroidApk() => BuildAndroid("Builds/AndroidTest", ".apk", false);
+
+    private static void BuildAndroid(string directory, string extension, bool appBundle)
     {
-        string dir = Path.GetDirectoryName(output);
-        Prepare(dir);
+        Prepare(directory);
+
+        EditorUserBuildSettings.buildAppBundle = appBundle;
+
+        string output = directory + "/" + ArtifactName() + extension;
+
         var options = new BuildPlayerOptions
-        { scenes = GetEnabledScenes(), locationPathName = output, target = BuildTarget.Android, options = BuildOptions.None };
+        {
+            scenes = GetEnabledScenes(),
+            locationPathName = output,
+            target = BuildTarget.Android,
+            options = BuildOptions.None
+        };
+
         Check(BuildPipeline.BuildPlayer(options));
+
+        WriteBuildInfo(output);
+
         UnityEngine.Debug.Log("[UMP] Android build: " + output);
     }
 
@@ -23,10 +41,72 @@ public static class JenkinsBuild
     {
         string output = "Builds/iOS";
         Prepare(output);
+
         var options = new BuildPlayerOptions
-        { scenes = GetEnabledScenes(), locationPathName = output, target = BuildTarget.iOS, options = BuildOptions.None };
+        {
+            scenes = GetEnabledScenes(),
+            locationPathName = output,
+            target = BuildTarget.iOS,
+            options = BuildOptions.None
+        };
+
         Check(BuildPipeline.BuildPlayer(options));
+
+        WriteBuildInfo(output);
+
         UnityEngine.Debug.Log("[UMP] iOS Xcode project: " + output);
+    }
+
+    // ProductName-v1.0.0, safe for a file name.
+    private static string ArtifactName()
+    {
+        return Sanitize(PlayerSettings.productName) +
+               "-v" +
+               Sanitize(PlayerSettings.bundleVersion);
+    }
+
+    private static string Sanitize(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "Game";
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder();
+
+        foreach (char c in value.Trim())
+        {
+            if (char.IsWhiteSpace(c) || invalid.Contains(c))
+                continue;
+
+            builder.Append(c);
+        }
+
+        return builder.Length == 0 ? "Game" : builder.ToString();
+    }
+
+    private static void WriteBuildInfo(string artifact)
+    {
+        try
+        {
+            Directory.CreateDirectory("Builds");
+
+            var lines = new[]
+            {
+                "PRODUCT_NAME=" + PlayerSettings.productName,
+                "PRODUCT_NAME_SAFE=" + Sanitize(PlayerSettings.productName),
+                "VERSION=" + PlayerSettings.bundleVersion,
+                "BUILD_NUMBER=" + PlayerSettings.Android.bundleVersionCode,
+                "ARTIFACT=" + artifact
+            };
+
+            File.WriteAllText(InfoFile, string.Join("\n", lines) + "\n");
+
+            UnityEngine.Debug.Log("[UMP] Build info: " + InfoFile);
+        }
+        catch (Exception ex)
+        {
+            UnityEngine.Debug.LogWarning("[UMP] Cannot write build info: " + ex.Message);
+        }
     }
 
     private static string[] GetEnabledScenes()
@@ -36,7 +116,9 @@ public static class JenkinsBuild
         foreach (var scene in scenes) UnityEngine.Debug.Log("[UMP] Scene: " + scene);
         return scenes;
     }
+
     private static void Prepare(string path) { if (Directory.Exists(path)) Directory.Delete(path, true); Directory.CreateDirectory(path); }
+
     private static void Check(BuildReport report)
     { if (report == null || report.summary.result != BuildResult.Succeeded) throw new Exception("Unity build failed: " + (report == null ? "null report" : report.summary.result)); }
 }

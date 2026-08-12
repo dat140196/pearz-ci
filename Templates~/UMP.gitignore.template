@@ -4,4 +4,5 @@ Builds/AndroidTest/
 Builds/iOS/
 Builds/iOSArchive/
 Builds/iOSExport/
+Builds/ump_build_info.txt
 .ump_artifact_path

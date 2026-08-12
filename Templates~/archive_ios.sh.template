@@ -43,4 +43,29 @@ xcodebuild \
     -exportPath "$EXPORT" \
     -exportOptionsPlist "$OPTIONS"
 
+# ------------------------------------------------------------
+# Rename the IPA to ProductName-v1.0.0.ipa,
+# using the info written by JenkinsBuild.
+# ------------------------------------------------------------
+
+INFO="$WORKSPACE/Builds/ump_build_info.txt"
+
+IPA="$(find "$EXPORT" -maxdepth 2 -type f -name "*.ipa" | head -n 1 || true)"
+
+if [ -n "$IPA" ] && [ -f "$INFO" ]; then
+
+    NAME="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' "$INFO" | tr -d '\r')"
+    VERSION="$(awk -F= '/^VERSION=/ {print $2; exit}' "$INFO" | tr -d '\r')"
+
+    if [ -n "$NAME" ] && [ -n "$VERSION" ]; then
+
+        TARGET="$(dirname "$IPA")/${NAME}-v${VERSION}.ipa"
+
+        if [ "$IPA" != "$TARGET" ]; then
+            mv "$IPA" "$TARGET"
+            echo "[PEARZ] IPA: $TARGET"
+        fi
+    fi
+fi
+
 find "$EXPORT" -maxdepth 2 -type f -print

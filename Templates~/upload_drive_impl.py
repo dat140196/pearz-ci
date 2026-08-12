@@ -19,7 +19,13 @@
 #      UMP_DRIVE_OAUTH_REFRESH_TOKEN
 #
 # Destination:
-#   UMP_DRIVE_FOLDER_ID
+#   UMP_DRIVE_FOLDER_ID   root folder / Shared Drive folder
+#
+#   Files are placed in  <root>/<Game name>/<APK|AAB>/file
+#   Game name comes from Builds/ump_build_info.txt (written by
+#   JenkinsBuild), or UMP_DRIVE_GAME_NAME, or JOB_NAME.
+#   UMP_DRIVE_SUBPATH overrides the whole sub path.
+#   UMP_DRIVE_SUBPATH="" uploads straight into the root folder.
 # ============================================================
 
 import os
@@ -241,6 +247,102 @@ def folder_info(access_token, folder_id):
         return None
 
 
+def escape_query(value):
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def find_folder(access_token, parent_id, name):
+
+    query = (
+        "name = '" + escape_query(name) + "' and "
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        "'" + escape_query(parent_id) + "' in parents and "
+        "trashed = false"
+    )
+
+    url = (
+        "https://www.googleapis.com/drive/v3/files?" +
+        urllib.parse.urlencode({
+            "q": query,
+            "fields": "files(id,name)",
+            "pageSize": "10",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "corpora": "allDrives"
+        })
+    )
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": "Bearer " + access_token
+        }
+    )
+
+    with http(request) as response:
+
+        files = json.loads(response.read().decode()).get("files", [])
+
+    return files[0]["id"] if files else None
+
+
+def create_folder(access_token, parent_id, name):
+
+    metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id]
+    }
+
+    url = (
+        "https://www.googleapis.com/drive/v3/files?" +
+        urllib.parse.urlencode({
+            "fields": "id,name",
+            "supportsAllDrives": "true"
+        })
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(metadata).encode(),
+        method="POST",
+        headers={
+
+            "Authorization":
+                "Bearer " + access_token,
+
+            "Content-Type":
+                "application/json; charset=UTF-8"
+        }
+    )
+
+    with http(request) as response:
+        return json.loads(response.read().decode())["id"]
+
+
+def resolve_folder(access_token, root_id, sub_path):
+
+    folder_id = root_id
+
+    for name in [p.strip() for p in sub_path.split("/") if p.strip()]:
+
+        existing = find_folder(access_token, folder_id, name)
+
+        if existing:
+
+            log("Drive folder: " + name + " (existing)")
+
+            folder_id = existing
+
+        else:
+
+            folder_id = create_folder(access_token, folder_id, name)
+
+            log("Drive folder: " + name + " (created)")
+
+    return folder_id
+
+
 def quota_help(using_service_account, info):
 
     print("")
@@ -385,33 +487,13 @@ def send_chunks(session_uri, access_token, file_path, file_size):
     return {}
 
 
-def upload(access_token, folder_id, file_path, using_service_account):
+def upload(access_token, folder_id, file_path, using_service_account, info):
 
     file_name = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
 
     log("Uploading to Google Drive: " + file_name)
     log("File size: " + str(file_size) + " bytes")
-
-    info = folder_info(access_token, folder_id)
-
-    if info is not None:
-
-        log(
-            "Destination folder: " + str(info.get("name")) +
-            (
-                " (Shared Drive)"
-                if info.get("driveId")
-                else " (My Drive)"
-            )
-        )
-
-        if using_service_account and not info.get("driveId"):
-
-            log(
-                "WARNING: folder is not in a Shared Drive - "
-                "a service account cannot own files there."
-            )
 
     try:
 
@@ -459,6 +541,74 @@ def upload(access_token, folder_id, file_path, using_service_account):
 # ============================================================
 # ENTRY
 # ============================================================
+
+def build_info():
+
+    path = os.environ.get(
+        "UMP_BUILD_INFO",
+        "Builds/ump_build_info.txt"
+    )
+
+    values = {}
+
+    if not os.path.isfile(path):
+        return values
+
+    with open(path, "r") as f:
+
+        for line in f:
+
+            line = line.strip()
+
+            if not line or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+
+            values[key.strip()] = value.strip()
+
+    return values
+
+
+def game_name(info):
+
+    name = os.environ.get("UMP_DRIVE_GAME_NAME", "").strip()
+
+    if name:
+        return name
+
+    name = info.get("PRODUCT_NAME", "").strip()
+
+    if name:
+        return name
+
+    # Multibranch job names look like "MeowPuzzle/release%2Fandroid".
+
+    job = os.environ.get("JOB_NAME", "").strip()
+
+    return job.split("/")[0] if job else ""
+
+
+def sub_path(file_path):
+
+    # An explicit value always wins, including an empty one
+    # (upload straight into the root folder).
+
+    if "UMP_DRIVE_SUBPATH" in os.environ:
+        return os.environ["UMP_DRIVE_SUBPATH"].strip()
+
+    kinds = {
+        ".apk": "APK",
+        ".aab": "AAB",
+        ".ipa": "IPA"
+    }
+
+    kind = kinds.get(os.path.splitext(file_path)[1].lower(), "")
+
+    parts = [p for p in [game_name(build_info()), kind] if p]
+
+    return "/".join(parts)
+
 
 def resolve_token():
 
@@ -541,9 +691,52 @@ if __name__ == "__main__":
 
     access_token, using_service_account = resolve_token()
 
+    info = folder_info(access_token, folder_id)
+
+    if info is not None:
+
+        log(
+            "Root folder: " + str(info.get("name")) +
+            (
+                " (Shared Drive)"
+                if info.get("driveId")
+                else " (My Drive)"
+            )
+        )
+
+        if using_service_account and not info.get("driveId"):
+
+            log(
+                "WARNING: folder is not in a Shared Drive - "
+                "a service account cannot own files there."
+            )
+
+    target = folder_id
+
+    path = sub_path(artifact)
+
+    if path:
+
+        log("Drive path: " + path)
+
+        try:
+
+            target = resolve_folder(access_token, folder_id, path)
+
+        except urllib.error.HTTPError as e:
+
+            log(
+                "WARNING: cannot create '" + path + "' "
+                "(HTTP " + str(e.code) + "). "
+                "Uploading into the root folder instead."
+            )
+
+            target = folder_id
+
     upload(
         access_token,
-        folder_id,
+        target,
         artifact,
-        using_service_account
+        using_service_account,
+        info
     )
