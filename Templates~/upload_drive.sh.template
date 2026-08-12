@@ -19,8 +19,25 @@ if [ ! -f "$ARTIFACT" ]; then
     exit 1
 fi
 
-if [ -z "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ]; then
-    echo "[PEARZ] ERROR: UMP_DRIVE_SERVICE_ACCOUNT_JSON is empty."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+HAS_SERVICE_ACCOUNT=0
+HAS_OAUTH=0
+
+if [ -n "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ]; then
+    HAS_SERVICE_ACCOUNT=1
+fi
+
+if [ -n "${UMP_DRIVE_OAUTH_CLIENT_ID:-}" ] \
+    && [ -n "${UMP_DRIVE_OAUTH_CLIENT_SECRET:-}" ] \
+    && [ -n "${UMP_DRIVE_OAUTH_REFRESH_TOKEN:-}" ]; then
+    HAS_OAUTH=1
+fi
+
+if [ "$HAS_SERVICE_ACCOUNT" -eq 0 ] && [ "$HAS_OAUTH" -eq 0 ]; then
+    echo "[PEARZ] ERROR: no Drive credential."
+    echo "[PEARZ] Set UMP_DRIVE_SERVICE_ACCOUNT_JSON"
+    echo "[PEARZ] or the UMP_DRIVE_OAUTH_* variables."
     exit 1
 fi
 
@@ -31,7 +48,7 @@ fi
 
 echo "[PEARZ] Artifact: $ARTIFACT"
 
-python3 Jenkins/upload_drive_impl.py "$ARTIFACT"
+python3 "$SCRIPT_DIR/upload_drive_impl.py" "$ARTIFACT"
 
 echo "========================================"
 echo "[PEARZ] Google Drive upload completed."

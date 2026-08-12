@@ -9,7 +9,37 @@ namespace UMP
 {
     public static class UMPSetup
     {
-        public static void Run(string unityPath, string iosScheme, bool overwrite)
+        private static readonly string[,] Files =
+        {
+            { "Templates~/Jenkinsfile.template", "Jenkinsfile" },
+            { "Templates~/JenkinsBuild.cs.template", "Assets/Editor/JenkinsBuild.cs" },
+            { "Templates~/find_unity.sh.template", "Jenkins/find_unity.sh" },
+            { "Templates~/build_android.sh.template", "Jenkins/build_android.sh" },
+            { "Templates~/build_ios.sh.template", "Jenkins/build_ios.sh" },
+            { "Templates~/archive_ios.sh.template", "Jenkins/archive_ios.sh" },
+            { "Templates~/upload_testflight.sh.template", "Jenkins/upload_testflight.sh" },
+            { "Templates~/upload_drive.sh.template", "Jenkins/upload_drive.sh" },
+            { "Templates~/upload_drive_impl.py", "Jenkins/upload_drive_impl.py" },
+            { "Templates~/notify_telegram.sh.template", "Jenkins/notify_telegram.sh" },
+            { "Templates~/ExportOptions.plist.template", "Jenkins/ExportOptions.plist" }
+        };
+
+        private static readonly string[] Executables =
+        {
+            "Jenkins/find_unity.sh",
+            "Jenkins/build_android.sh",
+            "Jenkins/build_ios.sh",
+            "Jenkins/archive_ios.sh",
+            "Jenkins/upload_testflight.sh",
+            "Jenkins/upload_drive.sh",
+            "Jenkins/upload_drive_impl.py",
+            "Jenkins/notify_telegram.sh"
+        };
+
+        // Sync always overwrites: the package templates are the
+        // source of truth. Unity is located by Jenkins/find_unity.sh
+        // on the build machine, so nothing has to be configured here.
+        public static void Run()
         {
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             string packageRoot = FindPackageRoot();
@@ -23,47 +53,35 @@ namespace UMP
                 return;
             }
 
-            Copy(projectRoot, packageRoot, "Templates~/Jenkinsfile.template",
-                "Jenkinsfile", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/JenkinsBuild.cs.template",
-                "Assets/Editor/JenkinsBuild.cs", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/build_android.sh.template",
-                "Jenkins/build_android.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/build_ios.sh.template",
-                "Jenkins/build_ios.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/archive_ios.sh.template",
-                "Jenkins/archive_ios.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/upload_testflight.sh.template",
-                "Jenkins/upload_testflight.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/upload_drive.sh.template",
-                "Jenkins/upload_drive.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/upload_drive_impl.py",
-                "Jenkins/upload_drive_impl.py", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/notify_telegram.sh.template",
-                "Jenkins/notify_telegram.sh", overwrite, unityPath, iosScheme);
-            Copy(projectRoot, packageRoot, "Templates~/ExportOptions.plist.template",
-                "Jenkins/ExportOptions.plist", overwrite, unityPath, iosScheme);
+            try
+            {
+                for (int i = 0; i < Files.GetLength(0); i++)
+                    Copy(projectRoot, packageRoot, Files[i, 0], Files[i, 1]);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError("[UMP] Sync failed: " + ex.Message);
+
+                EditorUtility.DisplayDialog("UMP", "Sync failed:\n\n" + ex.Message, "OK");
+                return;
+            }
 
             AppendGitignore(projectRoot, packageRoot);
 
-            MakeExecutable(projectRoot, "Jenkins/build_android.sh");
-            MakeExecutable(projectRoot, "Jenkins/build_ios.sh");
-            MakeExecutable(projectRoot, "Jenkins/archive_ios.sh");
-            MakeExecutable(projectRoot, "Jenkins/upload_testflight.sh");
-            MakeExecutable(projectRoot, "Jenkins/upload_drive.sh");
-            MakeExecutable(projectRoot, "Jenkins/upload_drive_impl.py");
-            MakeExecutable(projectRoot, "Jenkins/notify_telegram.sh");
+            foreach (string executable in Executables)
+                MakeExecutable(projectRoot, executable);
 
             AssetDatabase.Refresh();
 
             EditorUtility.DisplayDialog(
                 "UMP",
-                "UMP files created/synced successfully.\n\n" +
+                "UMP files synced successfully.\n\n" +
                 "release/android -> AAB\n" +
                 "release/android-test -> APK\n" +
                 "release/ios-test -> iOS device build\n" +
                 "release/ios -> TestFlight\n\n" +
-                "Drive + Telegram files were installed.",
+                "Unity is auto-detected on the build machine\n" +
+                "from ProjectSettings/ProjectVersion.txt.",
                 "OK");
         }
 
@@ -102,10 +120,7 @@ namespace UMP
             string projectRoot,
             string packageRoot,
             string sourceRelative,
-            string destinationRelative,
-            bool overwrite,
-            string unityPath,
-            string iosScheme)
+            string destinationRelative)
         {
             string source = Path.Combine(packageRoot, sourceRelative);
             string destination = Path.Combine(projectRoot, destinationRelative);
@@ -113,16 +128,13 @@ namespace UMP
             if (!File.Exists(source))
                 throw new FileNotFoundException("UMP template missing: " + source);
 
-            if (!overwrite && File.Exists(destination))
-                return;
-
             string directory = Path.GetDirectoryName(destination);
             if (!string.IsNullOrEmpty(directory))
                 Directory.CreateDirectory(directory);
 
-            string content = File.ReadAllText(source)
-                .Replace("__UMP_UNITY_PATH__", unityPath ?? "")
-                .Replace("__UMP_IOS_SCHEME__", iosScheme ?? "Unity-iPhone");
+            // Shell and Python files run on the Jenkins Mac,
+            // so they must keep LF endings.
+            string content = File.ReadAllText(source).Replace("\r\n", "\n");
 
             File.WriteAllText(destination, content);
         }
@@ -148,6 +160,9 @@ namespace UMP
         {
             string path = Path.Combine(projectRoot, relativePath);
             if (!File.Exists(path))
+                return;
+
+            if (Application.platform == RuntimePlatform.WindowsEditor)
                 return;
 
             try

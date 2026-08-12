@@ -1,11 +1,13 @@
-# UMP 1.1.0 Checklist
+# UMP 1.2.0 Checklist
 - [ ] Install UMP by Git URL
-- [ ] Run Tools > UMP > Setup / Sync Jenkins Files
+- [ ] Run Tools > UMP > Setup / Sync Jenkins Files -> Sync UMP Files
+- [ ] Commit the generated Jenkinsfile + Jenkins/ folder
 - [ ] Enable all required Build Settings scenes
 - [ ] Configure Jenkins Multibranch Pipeline + webhook
 - [ ] Configure Telegram token/chat ID
-- [ ] Create Drive folder and share it with service account
-- [ ] Configure Drive service-account JSON path + folder ID
+- [ ] Create the destination folder in a **Shared Drive** (service accounts have no storage quota)
+- [ ] Add the service-account email as Content manager on that Shared Drive
+- [ ] Set UMP_DRIVE_SERVICE_ACCOUNT_JSON + UMP_DRIVE_FOLDER_ID credentials
 - [ ] Test release/android
 - [ ] Test release/android-test
 - [ ] Test release/ios-test

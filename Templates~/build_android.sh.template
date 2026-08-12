@@ -7,23 +7,14 @@ set -euo pipefail
 # release/android-test -> APK
 # ============================================================
 
-UNITY_PATH="${UNITY_PATH:-}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Nếu Jenkins chưa truyền UNITY_PATH hoặc path không tồn tại,
-# tự tìm Unity được cài qua Unity Hub.
-if [ -z "$UNITY_PATH" ] || [ ! -x "$UNITY_PATH" ]; then
-    echo "[PEARZ] UNITY_PATH is empty or invalid."
-    echo "[PEARZ] Searching for Unity..."
+chmod +x "$SCRIPT_DIR/find_unity.sh" 2>/dev/null || true
 
-    UNITY_PATH="$(find /Applications/Unity/Hub/Editor \
-        -type f \
-        -path "*/Unity.app/Contents/MacOS/Unity" \
-        2>/dev/null | sort -V | tail -n 1 || true)"
-fi
+UNITY_PATH="$("$SCRIPT_DIR/find_unity.sh")"
 
 if [ -z "$UNITY_PATH" ] || [ ! -x "$UNITY_PATH" ]; then
     echo "[PEARZ] ERROR: Unity executable not found."
-    echo "[PEARZ] Please install Unity or configure UNITY_PATH in Jenkins."
     exit 1
 fi
 

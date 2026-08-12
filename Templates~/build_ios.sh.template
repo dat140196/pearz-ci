@@ -1,5 +1,39 @@
 #!/bin/bash
 set -euo pipefail
-UNITY_PATH="${UNITY_PATH:-__UMP_UNITY_PATH__}"
 
-"$UNITY_PATH" -batchmode -quit   -projectPath "$WORKSPACE"   -executeMethod JenkinsBuild.BuildIOS   -buildTarget iOS   -logFile -
+# ============================================================
+# PEARZ iOS Build -> Xcode project in Builds/iOS
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+chmod +x "$SCRIPT_DIR/find_unity.sh" 2>/dev/null || true
+
+UNITY_PATH="$("$SCRIPT_DIR/find_unity.sh")"
+
+if [ -z "$UNITY_PATH" ] || [ ! -x "$UNITY_PATH" ]; then
+    echo "[PEARZ] ERROR: Unity executable not found."
+    exit 1
+fi
+
+if [ -z "${WORKSPACE:-}" ]; then
+    echo "[PEARZ] ERROR: WORKSPACE is not defined."
+    exit 1
+fi
+
+echo "[PEARZ] Unity Path : $UNITY_PATH"
+echo "[PEARZ] Branch     : ${BRANCH_NAME:-unknown}"
+echo "[PEARZ] Workspace  : $WORKSPACE"
+
+"$UNITY_PATH" \
+    -batchmode \
+    -quit \
+    -nographics \
+    -projectPath "$WORKSPACE" \
+    -buildTarget iOS \
+    -executeMethod JenkinsBuild.BuildIOS \
+    -logFile -
+
+echo "========================================"
+echo "[PEARZ] iOS Xcode project generated"
+echo "========================================"

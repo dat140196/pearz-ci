@@ -1,0 +1,101 @@
+#!/bin/bash
+
+# ============================================================
+# PEARZ / UMP - locate the Unity editor executable
+#
+# Priority:
+#   1. $UNITY_PATH if it is a valid executable
+#   2. Unity Hub install matching ProjectSettings/ProjectVersion.txt
+#   3. Newest Unity Hub install found on the machine
+#
+# Usage:  UNITY_PATH="$(./Jenkins/find_unity.sh)"
+# ============================================================
+
+set -euo pipefail
+
+PROJECT_ROOT="${WORKSPACE:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+HUB_DIRS=(
+    "/Applications/Unity/Hub/Editor"
+    "$HOME/Applications/Unity/Hub/Editor"
+)
+
+log() {
+    echo "[PEARZ] $*" >&2
+}
+
+# ------------------------------------------------------------
+# 1. Explicit UNITY_PATH
+# ------------------------------------------------------------
+
+if [ -n "${UNITY_PATH:-}" ] && [ -x "${UNITY_PATH}" ]; then
+    echo "$UNITY_PATH"
+    exit 0
+fi
+
+if [ -n "${UNITY_PATH:-}" ]; then
+    log "UNITY_PATH is set but not executable: $UNITY_PATH"
+fi
+
+# ------------------------------------------------------------
+# 2. Version required by the project
+# ------------------------------------------------------------
+
+VERSION_FILE="$PROJECT_ROOT/ProjectSettings/ProjectVersion.txt"
+
+PROJECT_VERSION=""
+
+if [ -f "$VERSION_FILE" ]; then
+
+    PROJECT_VERSION="$(awk '/^m_EditorVersion:/ {print $2; exit}' \
+        "$VERSION_FILE" | tr -d '\r')"
+fi
+
+if [ -n "$PROJECT_VERSION" ]; then
+
+    log "Project Unity version: $PROJECT_VERSION"
+
+    for hub in "${HUB_DIRS[@]}"; do
+
+        candidate="$hub/$PROJECT_VERSION/Unity.app/Contents/MacOS/Unity"
+
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            exit 0
+        fi
+    done
+
+    log "Unity $PROJECT_VERSION is not installed. Falling back."
+fi
+
+# ------------------------------------------------------------
+# 3. Newest installed Unity
+# ------------------------------------------------------------
+
+FOUND=""
+
+for hub in "${HUB_DIRS[@]}"; do
+
+    [ -d "$hub" ] || continue
+
+    match="$(find "$hub" \
+        -maxdepth 4 \
+        -type f \
+        -path "*/Unity.app/Contents/MacOS/Unity" \
+        2>/dev/null | sort -V | tail -n 1 || true)"
+
+    if [ -n "$match" ]; then
+        FOUND="$match"
+    fi
+done
+
+if [ -n "$FOUND" ]; then
+    echo "$FOUND"
+    exit 0
+fi
+
+log "ERROR: Unity executable not found."
+log "Install Unity via Unity Hub on the build machine,"
+log "or set UNITY_PATH in Jenkins."
+
+exit 1

@@ -2,10 +2,6 @@ pipeline {
 
     agent any
 
-    environment {
-        IOS_SCHEME = '**UMP_IOS_SCHEME**'
-    }
-
     stages {
 
         // ====================================================
@@ -52,6 +48,7 @@ pipeline {
 
             steps {
                 sh '''
+                    chmod +x Jenkins/find_unity.sh
                     chmod +x Jenkins/build_android.sh
                     ./Jenkins/build_android.sh
                 '''
@@ -73,6 +70,7 @@ pipeline {
 
             steps {
                 sh '''
+                    chmod +x Jenkins/find_unity.sh
                     chmod +x Jenkins/build_android.sh
                     ./Jenkins/build_android.sh
                 '''
@@ -94,6 +92,7 @@ pipeline {
 
             steps {
                 sh '''
+                    chmod +x Jenkins/find_unity.sh
                     chmod +x Jenkins/build_ios.sh
                     ./Jenkins/build_ios.sh
                 '''
@@ -115,6 +114,7 @@ pipeline {
 
             steps {
                 sh '''
+                    chmod +x Jenkins/find_unity.sh
                     chmod +x Jenkins/build_ios.sh
                     ./Jenkins/build_ios.sh
                 '''

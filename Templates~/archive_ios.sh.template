@@ -4,7 +4,6 @@ set -euo pipefail
 IOS_PATH="$WORKSPACE/Builds/iOS"
 ARCHIVE="$WORKSPACE/Builds/iOSArchive/Game.xcarchive"
 EXPORT="$WORKSPACE/Builds/iOSExport"
-SCHEME="${IOS_SCHEME:-__UMP_IOS_SCHEME__}"
 OPTIONS="$WORKSPACE/Jenkins/ExportOptions.plist"
 
 rm -rf "$WORKSPACE/Builds/iOSArchive" "$EXPORT"
@@ -12,8 +11,36 @@ mkdir -p "$(dirname "$ARCHIVE")" "$EXPORT"
 
 cd "$IOS_PATH"
 
-xcodebuild   -project Unity-iPhone.xcodeproj   -scheme "$SCHEME"   -configuration Release   -archivePath "$ARCHIVE"   archive
+# ------------------------------------------------------------
+# Scheme: IOS_SCHEME if provided, otherwise read it
+# from the generated Xcode project.
+# ------------------------------------------------------------
 
-xcodebuild   -exportArchive   -archivePath "$ARCHIVE"   -exportPath "$EXPORT"   -exportOptionsPlist "$OPTIONS"
+SCHEME="${IOS_SCHEME:-}"
+
+if [ -z "$SCHEME" ]; then
+
+    SCHEME="$(xcodebuild -list -project Unity-iPhone.xcodeproj 2>/dev/null \
+        | awk '/Schemes:/ {found=1; next} found && NF {print $1; exit}')"
+fi
+
+if [ -z "$SCHEME" ]; then
+    SCHEME="Unity-iPhone"
+fi
+
+echo "[PEARZ] Xcode scheme: $SCHEME"
+
+xcodebuild \
+    -project Unity-iPhone.xcodeproj \
+    -scheme "$SCHEME" \
+    -configuration Release \
+    -archivePath "$ARCHIVE" \
+    archive
+
+xcodebuild \
+    -exportArchive \
+    -archivePath "$ARCHIVE" \
+    -exportPath "$EXPORT" \
+    -exportOptionsPlist "$OPTIONS"
 
 find "$EXPORT" -maxdepth 2 -type f -print

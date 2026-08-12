@@ -1,0 +1,4 @@
+# Jenkins scripts must keep LF endings; they run on macOS build agents.
+Templates~/*.sh.template text eol=lf
+Templates~/*.py text eol=lf
+Templates~/Jenkinsfile.template text eol=lf
