@@ -89,7 +89,24 @@ def buildAndroid() {
 
 pipeline {
 
-    agent any
+    // The project is checked out on the Desktop of the build machine
+    // instead of the hidden Jenkins workspace, so the exact tree that
+    // was built can be opened in Finder, Unity or Xcode while a
+    // failure is being looked at.
+    //
+    // "~" is the home of the user Jenkins runs as - not necessarily
+    // the user logged in to the Mac. Set the global environment
+    // variable UMP_WORKSPACE_ROOT (Manage Jenkins > System) to put
+    // the checkout somewhere else.
+    agent {
+
+        node {
+
+            label ''
+
+            customWorkspace "${env.UMP_WORKSPACE_ROOT ?: (env.HOME ?: '/Users/Shared') + '/Desktop/PearzBuilds'}/${env.JOB_NAME}"
+        }
+    }
 
     options {
 
@@ -149,7 +166,8 @@ pipeline {
 
                         echo "========================================"
                         echo "[PEARZ] BUILD"
-                        echo "[PEARZ] Branch: ${env.BRANCH_NAME}"
+                        echo "[PEARZ] Branch    : ${env.BRANCH_NAME}"
+                        echo "[PEARZ] Checkout  : ${env.WORKSPACE}"
                         echo "========================================"
                     }
                 }

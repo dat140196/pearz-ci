@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.13.0
+# UMP Unity Mobile Pipeline 1.0.6
 
 Install using Unity Package Manager -> Add package from Git URL.
 
@@ -8,7 +8,7 @@ aborts the build with `Project has invalid dependencies`. Add `#<tag>` in
 `Packages/manifest.json`:
 
 ```json
-"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.12.2"
+"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.6"
 ```
 
 Unity then locks that revision in `packages-lock.json` and reuses its
@@ -19,7 +19,7 @@ The Jenkinsfile and the `Jenkins/` scripts are written into the project
 
 To force a sync (e.g. after editing the generated files by hand):
 
-**Pearz > SetupJenkin** -> `Force Sync UMP Files`
+**Pearz > SetupJenkin** -> `Sync`
 
 No Unity path to fill in: the build machine resolves Unity itself
 (`Jenkins/find_unity.sh`) from `ProjectSettings/ProjectVersion.txt`,
@@ -37,118 +37,69 @@ Jenkins credentials (Secret text):
 - UMP_TELEGRAM_BOT_TOKEN
 - UMP_TELEGRAM_CHAT_ID
 
-Android signing needs no credential: commit the key as
-`Keystores/<package-name>.keystore` + `.properties` in the game repo
-(see JENKINS_SETUP.md).
+## Build workspace
 
-## 1.13.0
-- `release/ios-test` strips `com.apple.InAppPurchase` from the generated
-  Xcode project before signing, because a free Personal Team cannot use
-  it. Only `Builds/` is touched; the repo, the game code and the
-  Android/TestFlight paths keep IAP. `UMP_IOS_STRIP_CAPABILITIES` tunes
-  or disables it.
-- The signing team is also read from the provisioning profiles Xcode
-  downloaded, not only from its preferences, which newer Xcode versions
-  no longer populate.
+The job does **not** build in the hidden Jenkins workspace. It checks the
+project out on the **Desktop of the build machine**, so the exact tree
+Jenkins built can be opened in Finder, Unity or Xcode while a failure is
+being looked at:
 
-## 1.12.4
-- Prefer the team of the Apple ID signed in to Xcode over a certificate
-  found in the keychain, and warn when the team being forced is not one
-  the account belongs to - that mismatch fails as "No profiles for ...",
-  which reads like a missing account.
+```
+~/Desktop/PearzBuilds/<job name>/<branch>
+```
 
-## 1.12.3
-- On a signing failure the log now prints the build user, whether an
-  Xcode account token is visible from the Jenkins session, the keychain
-  search list and the profile count - enough to tell "no account" apart
-  from "locked keychain" without another build.
+`Builds/` and the generated Xcode project are inside that folder as usual.
 
-## 1.12.2
-- The "no Apple ID signed in" check is a hint, not a gate: where Xcode
-  records accounts varies by version, so the build always runs and the
-  signing guidance is printed from xcodebuild's own error instead.
+`~` is the home of the **user Jenkins runs as**. Started with
+`brew services start jenkins-lts` that is your own account and the folder
+shows up on your Desktop right away. Installed as the system service, it
+is the `jenkins` user instead, whose Desktop no Finder window ever shows -
+point the build somewhere visible with a global environment variable
+(**Manage Jenkins > System > Global properties > Environment variables**):
 
-## 1.12.1
-- Detect "certificate present but no Apple ID signed in to Xcode" before
-  building, and support an App Store Connect API key
-  (`UMP_ASC_KEY_PATH` / `_KEY_ID` / `_ISSUER_ID`) for headless signing.
+```
+UMP_WORKSPACE_ROOT = /Users/<you>/Desktop/PearzBuilds
+```
 
-## 1.12.0
-- The iOS Xcode project is exported to `Builds/iOS/<Game name>/`, and the
-  scripts find the `.xcodeproj` instead of assuming a fixed path.
-- The signing team is taken from `UMP_IOS_TEAM_ID`, then Player Settings,
-  then the Apple Development certificate on the Mac. Missing team now
-  stops the stage with instructions.
+That user then needs write access to the folder. The first build after
+this change re-clones the project into the new location; the old workspace
+under `~/.jenkins/workspace` can be deleted by hand.
 
-## 1.11.2
-- Pick the `Unity-iPhone` scheme instead of the first one listed.
-  `GameAssembly` sorts first and only builds the IL2CPP static library,
-  so the install stage found no `.app`. Same fix in `archive_ios.sh`.
+## Android signing
 
-## 1.11.0
-- `release/ios-test` now really installs on the device attached to the
-  Jenkins Mac: xcodebuild compiles the generated Xcode project for that
-  device and `devicectl` (or `ios-deploy`) installs and launches it.
-  Before, the stage only produced an Xcode project and reported SUCCESS.
+No Jenkins credential: the key is committed with the game and looked up by
+**package name** (`applicationIdentifier` in Player Settings), in
+`Keystores/` next to `Assets/`:
 
-## 1.10.0
-- Drive upload overwrites a file of the same name in the same folder
-  (new revision, same id and link) instead of adding another copy, and
-  trashes duplicates left by earlier builds
-  (`UMP_DRIVE_KEEP_DUPLICATES=1` to keep them).
+```
+Keystores/
+  com.pearz.meowpuzzle.keystore
+  com.pearz.meowpuzzle.properties
+```
 
-## 1.9.0
-- Keystore passwords from a `.properties` file are passed to Unity in a
-  600 temp file, not in the environment: Unity dumps all environment
-  variables into the log when Gradle fails, and Jenkins cannot mask a
-  value it never issued.
+Create the key once, then back it up - losing it means the app can never be
+updated on Google Play again:
 
-## 1.8.0
-- Keystores are read from `Keystores/<package-name>.keystore` in the game
-  repo first, then from `~/.pearz/keystores`, then from job credentials.
-  A new project only needs a git push.
+```
+keytool -genkeypair -v -keystore Keystores/com.pearz.meowpuzzle.keystore \
+  -alias pearz -keyalg RSA -keysize 2048 -validity 10000
+```
 
-## 1.7.0
-- Keystores are resolved per project from `~/.pearz/keystores` by
-  applicationIdentifier, so several games share one Jenkins without one
-  set of credentials each. Jenkins credentials still override it.
+The `.properties` file is written by **Pearz > SetupJenkin**: fill in
+`storePass`, `alias`, `aliasPass` and press `Sync`. The file is named after
+the package name and overwritten on every sync; leaving all three fields
+empty writes nothing. `aliasPass` may stay empty when the alias uses the
+store password, and `alias` must match what is really inside the key file
+(`keytool -list -v -keystore Keystores/<package>.keystore`) - a wrong value
+fails the build with `No key with alias 'x' found in keystore`.
 
-## 1.6.0
-- Android release signing from Jenkins credentials
-  (`UMP_ANDROID_KEYSTORE` + pass/alias). Unity never creates a release
-  keystore and does not keep passwords in the project, so a batchmode
-  build cannot sign without them. The AAB build now fails instead of
-  silently producing a debug-signed bundle Google Play would reject;
-  the test APK still falls back to the debug key.
+Lookup order is `<applicationIdentifier>`, the product name without spaces,
+then `default`; `Keystores/` in the repo first, then
+`~/.pearz/keystores` on the build machine
+(`UMP_KEYSTORE_HOME`), then job credentials
+(`UMP_ANDROID_KEYSTORE_PASS` / `UMP_ANDROID_KEY_ALIAS` /
+`UMP_ANDROID_KEY_ALIAS_PASS`), which win over both.
 
-## 1.5.0
-- Builds start on push: `pollSCM` trigger in the Jenkinsfile, plus
-  `disableConcurrentBuilds()` and log rotation. Non-release branches end
-  as NOT_BUILT instead of failing, with no Telegram spam.
-
-## 1.4.0
-- Files sync automatically on install/update (signature of the package
-  version + templates is cached in `Library/UMP.sync`). Skipped in
-  batch mode so Jenkins builds never rewrite the workspace.
-- Menu moved to **Pearz > SetupJenkin**; the button is now a manual
-  fallback.
-- Unchanged files are no longer rewritten, so Unity does not reimport
-  `JenkinsBuild.cs` on every sync.
-
-## 1.3.0
-- Artifacts are named `ProductName-vVersion` from Player Settings
-  (e.g. `MeowPuzzle-v1.0.0.apk`).
-- Drive uploads go to `<root>/<Game name>/<APK|AAB>/`, folders created
-  automatically.
-- Drive upload runs on Android branches only; iOS uses TestFlight /
-  direct install.
-- `release/android` now really produces an AAB (`buildAppBundle` was
-  never enabled).
-
-## 1.2.0
-- Drive upload uses resumable upload + `supportsAllDrives`, so it works
-  with Shared Drives. A service account has no storage quota of its own,
-  so the destination folder must be in a Shared Drive, or you must use
-  impersonation / an OAuth refresh token. See `Documentation~/JENKINS_SETUP.md`.
-- Unity is auto-detected; the Unity path and iOS scheme fields are gone.
-- iOS scheme is read from the generated Xcode project.
+The passwords are plain text, so the game repository must be **private**.
+If the key may not live in git, skip the `.properties` file and use the
+Jenkins credentials or the machine store instead.

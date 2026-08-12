@@ -49,24 +49,6 @@ namespace UMP
             get { return Directory.GetParent(Application.dataPath).FullName; }
         }
 
-        // Manual sync from the window: reports through a dialog.
-        public static void Run()
-        {
-            if (!Sync(false))
-                return;
-
-            EditorUtility.DisplayDialog(
-                "UMP",
-                "UMP files synced successfully.\n\n" +
-                "release/android -> AAB\n" +
-                "release/android-test -> APK\n" +
-                "release/ios-test -> iOS device build\n" +
-                "release/ios -> TestFlight\n\n" +
-                "Artifacts are named ProductName-vVersion.\n" +
-                "Unity is auto-detected on the build machine.",
-                "OK");
-        }
-
         // Sync always overwrites: the package templates are the
         // source of truth. Unity is located by Jenkins/find_unity.sh
         // on the build machine, so nothing has to be configured here.
@@ -108,7 +90,16 @@ namespace UMP
 
         public static void OpenJenkinsFolder()
         {
-            string path = Path.Combine(ProjectRoot, "Jenkins");
+            Reveal(Path.Combine(ProjectRoot, "Jenkins"));
+        }
+
+        public static void OpenKeystoresFolder()
+        {
+            Reveal(UMPKeystore.FolderPath());
+        }
+
+        private static void Reveal(string path)
+        {
             Directory.CreateDirectory(path);
             EditorUtility.RevealInFinder(path);
         }
