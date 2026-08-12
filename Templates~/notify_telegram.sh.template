@@ -1,6 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
+# ============================================================
+# PEARZ / UMP - Telegram build notification
+#
+# Posts the build result into a topic named after the game, and
+# creates that topic the first time the game is built.
+#
+# Jenkins credentials (Secret text):
+#   UMP_TELEGRAM_BOT_TOKEN   from @BotFather
+#   UMP_TELEGRAM_CHAT_ID     the group, e.g. -1001234567890
+#
+# Optional (global environment variables):
+#   UMP_GAME_NAME            override the game name
+#   UMP_TELEGRAM_AUTO_TOPIC=0    never create a topic
+#   UMP_TELEGRAM_TOPIC_ID    pin every build to one topic
+#   UMP_TELEGRAM_TOPICS      "MeowPuzzle=2;Sandshooter=7" -
+#                            topics created by hand, these win
+#   UMP_TELEGRAM_TOPIC_STATE where the created topic ids are
+#                            remembered (default
+#                            ~/.pearz/telegram-topics)
+#
+# The bot must be an administrator of the group with the
+# "Manage topics" right, and the group must have Topics on.
+# Without that the message still goes to the group, unthreaded.
+# ============================================================
+
 TOKEN="${UMP_TELEGRAM_BOT_TOKEN:-}"
 CHAT_ID="${UMP_TELEGRAM_CHAT_ID:-}"
 
@@ -16,6 +41,187 @@ BUILD="${BUILD_NUMBER:-unknown}"
 URL="${BUILD_URL:-}"
 ARTIFACT="${UMP_ARTIFACT:-}"
 
+# ------------------------------------------------------------
+# Game name
+#
+# JOB_NAME is "MeowPuzzle/release%2Fandroid" on a multibranch
+# job, which reads badly in a chat and makes an ugly topic.
+# Player Settings knows the real name.
+# ------------------------------------------------------------
+
+GAME="${UMP_GAME_NAME:-}"
+
+if [ -z "$GAME" ] && [ -f "${WORKSPACE:-}/ProjectSettings/ProjectSettings.asset" ]; then
+
+    GAME="$(sed -n 's/^  productName: //p' \
+        "$WORKSPACE/ProjectSettings/ProjectSettings.asset" 2>/dev/null \
+        | head -n 1 \
+        | tr -d '\r' || true)"
+fi
+
+# "MeowPuzzle/release%2Fandroid" -> "MeowPuzzle"
+[ -n "$GAME" ] || GAME="${JOB%%/*}"
+
+# ------------------------------------------------------------
+# Telegram helpers
+# ------------------------------------------------------------
+
+# No -f: a 400 carries the reason in its body, which is the
+# only way to tell "not a forum" from "topic deleted".
+tg_api() {
+
+    local method="$1"
+    shift
+
+    curl -sS -X POST \
+        "https://api.telegram.org/bot${TOKEN}/${method}" \
+        "$@" 2>/dev/null || true
+}
+
+tg_ok() {
+    echo "$1" | grep -q '"ok":true'
+}
+
+tg_error() {
+
+    echo "$1" \
+        | sed -n 's/.*"description":"\([^"]*\)".*/\1/p' \
+        | head -n 1
+}
+
+# ------------------------------------------------------------
+# Topic of a forum group
+#
+# The Bot API cannot list the topics of a group, so the ids of
+# the ones this bot created are kept on the build machine. The
+# file survives workspace wipes; delete it to start over.
+# ------------------------------------------------------------
+
+TOPIC_STATE="${UMP_TELEGRAM_TOPIC_STATE:-$HOME/.pearz/telegram-topics}"
+
+topic_remembered() {
+
+    [ -f "$TOPIC_STATE" ] || return 0
+
+    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
+        '$1 == chat && $2 == game { print $3; exit }' \
+        "$TOPIC_STATE" 2>/dev/null || true
+}
+
+topic_remember() {
+
+    local id="$1"
+
+    mkdir -p "$(dirname "$TOPIC_STATE")"
+    touch "$TOPIC_STATE"
+
+    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
+        '!($1 == chat && $2 == game)' \
+        "$TOPIC_STATE" > "$TOPIC_STATE.tmp" 2>/dev/null || true
+
+    mv "$TOPIC_STATE.tmp" "$TOPIC_STATE" 2>/dev/null || true
+
+    printf '%s\t%s\t%s\n' "$CHAT_ID" "$GAME" "$id" >> "$TOPIC_STATE"
+}
+
+topic_forget() {
+
+    [ -f "$TOPIC_STATE" ] || return 0
+
+    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
+        '!($1 == chat && $2 == game)' \
+        "$TOPIC_STATE" > "$TOPIC_STATE.tmp" 2>/dev/null || true
+
+    mv "$TOPIC_STATE.tmp" "$TOPIC_STATE" 2>/dev/null || true
+}
+
+# One of the six colours Telegram accepts, picked from the name
+# so a game keeps the same icon everywhere.
+topic_color() {
+
+    local colors=(7322096 16766590 13338331 9367192 16749490 16478047)
+    local index
+
+    index=$(( $(printf '%s' "$GAME" | cksum | cut -d' ' -f1) % 6 ))
+
+    echo "${colors[$index]}"
+}
+
+topic_create() {
+
+    local response
+    local id
+
+    response="$(tg_api createForumTopic \
+        --data-urlencode "chat_id=${CHAT_ID}" \
+        --data-urlencode "name=${GAME}" \
+        --data-urlencode "icon_color=$(topic_color)")"
+
+    if ! tg_ok "$response"; then
+
+        echo "[PEARZ] Cannot create the topic '$GAME': $(tg_error "$response")" >&2
+        echo "[PEARZ] Turn Topics on for the group and make the bot an" >&2
+        echo "[PEARZ] admin with 'Manage topics'. Posting to the group" >&2
+        echo "[PEARZ] itself for now." >&2
+
+        return 0
+    fi
+
+    id="$(echo "$response" \
+        | sed -n 's/.*"message_thread_id":\([0-9]*\).*/\1/p' \
+        | head -n 1)"
+
+    [ -n "$id" ] || return 0
+
+    topic_remember "$id"
+
+    echo "$id"
+}
+
+AUTO_TOPIC="${UMP_TELEGRAM_AUTO_TOPIC:-1}"
+
+# 1. One topic for everything.
+THREAD="${UMP_TELEGRAM_TOPIC_ID:-}"
+
+# 2. Topics created by hand, "<game>=<topic id>" pairs.
+if [ -z "$THREAD" ] && [ -n "${UMP_TELEGRAM_TOPICS:-}" ]; then
+
+    OLD_IFS="$IFS"
+    IFS=';'
+
+    for pair in $UMP_TELEGRAM_TOPICS; do
+
+        key="$(echo "${pair%%=*}" | sed 's/^ *//; s/ *$//')"
+        value="$(echo "${pair#*=}" | tr -d ' \r')"
+
+        [ "$key" = "$GAME" ] && THREAD="$value"
+    done
+
+    IFS="$OLD_IFS"
+fi
+
+# 3. The topic this bot created for the game earlier, or a new one.
+if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ]; then
+
+    THREAD="$(topic_remembered)"
+
+    if [ -n "$THREAD" ]; then
+
+        echo "[PEARZ] Telegram topic '$GAME': $THREAD"
+
+    else
+
+        THREAD="$(topic_create)"
+
+        [ -n "$THREAD" ] &&
+            echo "[PEARZ] Telegram topic '$GAME' created: $THREAD"
+    fi
+fi
+
+# ------------------------------------------------------------
+# Message
+# ------------------------------------------------------------
+
 ICON="⚠️"
 
 if [ "$STATUS" = "SUCCESS" ]; then
@@ -26,18 +232,83 @@ if [ "$STATUS" = "FAILURE" ]; then
     ICON="❌"
 fi
 
-TEXT="${ICON} PEARZ Build ${STATUS}\nProject: ${JOB}\nBranch: ${BRANCH}\nBuild: #${BUILD}"
+TEXT="${ICON} ${GAME} - ${STATUS}\nBranch: ${BRANCH}\nBuild: #${BUILD}"
+
+if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
+    TEXT="${TEXT}\nArtifact: $(basename "$ARTIFACT")"
+fi
 
 if [ -n "$URL" ]; then
     TEXT="${TEXT}\nJenkins: ${URL}"
 fi
 
-curl -fsS \
-    -X POST \
-    "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${TEXT}" \
-    >/dev/null || true
+send_message() {
+
+    local args=(
+        --data-urlencode "chat_id=${CHAT_ID}"
+        --data-urlencode "text=${TEXT}"
+    )
+
+    [ -n "$THREAD" ] && args+=(--data-urlencode "message_thread_id=${THREAD}")
+
+    tg_api sendMessage "${args[@]}"
+}
+
+RESPONSE="$(send_message)"
+
+# The topic can be closed or deleted between two builds, and the
+# remembered id then points at nothing. Reopen it, or make a new
+# one - never lose the notification over it.
+if ! tg_ok "$RESPONSE" && [ -n "$THREAD" ]; then
+
+    DESCRIPTION="$(tg_error "$RESPONSE")"
+
+    echo "[PEARZ] Telegram topic $THREAD refused: $DESCRIPTION"
+
+    # Only a broken topic is worth forgetting. A bad token or a
+    # wrong chat id says nothing about the topic, and dropping
+    # the id there would make a duplicate topic on every build.
+    case "$DESCRIPTION" in
+
+        *TOPIC_CLOSED*)
+
+            tg_api reopenForumTopic \
+                --data-urlencode "chat_id=${CHAT_ID}" \
+                --data-urlencode "message_thread_id=${THREAD}" \
+                >/dev/null
+
+            RESPONSE="$(send_message)"
+            ;;
+
+        *"thread not found"*|*TOPIC_DELETED*)
+
+            topic_forget
+
+            THREAD="$(topic_create)"
+
+            [ -n "$THREAD" ] &&
+                echo "[PEARZ] Telegram topic '$GAME' recreated: $THREAD"
+
+            RESPONSE="$(send_message)"
+            ;;
+    esac
+
+    # Still no: post to the group itself rather than lose it.
+    if ! tg_ok "$RESPONSE" && [ -n "$THREAD" ]; then
+
+        THREAD=""
+        RESPONSE="$(send_message)"
+    fi
+fi
+
+tg_ok "$RESPONSE" ||
+    echo "[PEARZ] Telegram message not sent: $(tg_error "$RESPONSE")"
+
+# ------------------------------------------------------------
+# Artifact
+#
+# A bot may upload 50 MB, which most AAB/APK builds pass.
+# ------------------------------------------------------------
 
 if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
 
@@ -49,13 +320,18 @@ if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
 
     if [ "$SIZE" -le 52428800 ]; then
 
-        curl -fsS \
-            -X POST \
-            "https://api.telegram.org/bot${TOKEN}/sendDocument" \
-            -F "chat_id=${CHAT_ID}" \
-            -F "document=@${ARTIFACT}" \
-            -F "caption=PEARZ ${BRANCH} #${BUILD}" \
-            >/dev/null || true
+        DOC_ARGS=(
+            -F "chat_id=${CHAT_ID}"
+            -F "document=@${ARTIFACT}"
+            -F "caption=${GAME} ${BRANCH} #${BUILD}"
+        )
+
+        [ -n "$THREAD" ] && DOC_ARGS+=(-F "message_thread_id=${THREAD}")
+
+        RESPONSE="$(tg_api sendDocument "${DOC_ARGS[@]}")"
+
+        tg_ok "$RESPONSE" ||
+            echo "[PEARZ] Telegram upload failed: $(tg_error "$RESPONSE")"
 
     else
 
