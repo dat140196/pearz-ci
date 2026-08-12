@@ -72,6 +72,19 @@ public static class JenkinsBuild
         string alias = Env("UMP_ANDROID_KEY_ALIAS");
         string aliasPass = Env("UMP_ANDROID_KEY_ALIAS_PASS");
 
+        // resolve_keystore.sh passes the passwords in a private file
+        // rather than the environment, which Unity dumps into the
+        // build log when Gradle fails.
+        string secrets = Env("UMP_ANDROID_KEYSTORE_PROPS");
+
+        if (secrets.Length > 0 && File.Exists(secrets))
+        {
+            keystore = Prop(secrets, "keystore", keystore);
+            keystorePass = Prop(secrets, "storePass", keystorePass);
+            alias = Prop(secrets, "alias", alias);
+            aliasPass = Prop(secrets, "aliasPass", aliasPass);
+        }
+
         if (keystore.Length == 0)
         {
             if (required)
@@ -114,6 +127,27 @@ public static class JenkinsBuild
     {
         string value = Environment.GetEnvironmentVariable(name);
         return value == null ? "" : value.Trim();
+    }
+
+    // key=value, one per line. A value may contain '='.
+    private static string Prop(string file, string key, string fallback)
+    {
+        foreach (string line in File.ReadAllLines(file))
+        {
+            int separator = line.IndexOf('=');
+
+            if (separator <= 0)
+                continue;
+
+            if (line.Substring(0, separator).Trim() != key)
+                continue;
+
+            string value = line.Substring(separator + 1).TrimEnd('\r', '\n');
+
+            return value.Length > 0 ? value : fallback;
+        }
+
+        return fallback;
     }
 
     // ProductName-v1.0.0, safe for a file name.

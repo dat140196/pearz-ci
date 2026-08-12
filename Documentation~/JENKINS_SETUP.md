@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.8.0
+# UMP Jenkins Setup 1.9.0
 
 ## Install / sync
 
@@ -219,9 +219,22 @@ at four however many projects there are.
 | `UMP_ANDROID_KEY_ALIAS` | Secret text | alias name |
 | `UMP_ANDROID_KEY_ALIAS_PASS` | Secret text | alias password |
 
-Either way `JenkinsBuild.ConfigureSigning` receives the values through
-environment variables and sets `PlayerSettings.Android.*` before building.
-Nothing is printed except the keystore path and the alias.
+Either way `JenkinsBuild.ConfigureSigning` sets `PlayerSettings.Android.*`
+before building, and nothing is printed except the keystore path and the
+alias.
+
+Passwords read from a `.properties` file are handed to Unity through a
+`chmod 600` temp file that is deleted when the build ends, **not** through
+environment variables: when a Gradle task fails, Unity dumps the whole
+environment into the build log, and Jenkins only masks values that came
+from its own credentials.
+
+If the alias is wrong the Gradle error is explicit:
+`No key with alias 'x' found in keystore`. List what is really inside:
+
+```
+keytool -list -v -keystore Keystores/<package>.keystore
+```
 
 ### Creating a keystore
 

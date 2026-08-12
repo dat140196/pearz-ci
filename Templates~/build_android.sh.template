@@ -34,6 +34,9 @@ fi
 
 . "$SCRIPT_DIR/resolve_keystore.sh"
 
+# The resolver may drop the passwords in a temp file.
+trap 'rm -f "${UMP_ANDROID_KEYSTORE_PROPS:-/dev/null}"' EXIT
+
 # ------------------------------------------------------------
 # Android TEST
 # release/android-test -> APK
