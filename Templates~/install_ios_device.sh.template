@@ -1,0 +1,239 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# ============================================================
+# PEARZ iOS - compile the Xcode project Unity generated and
+# install it on a device plugged into the Jenkins Mac.
+# Used by release/ios-test.
+#
+# Optional Jenkins env vars:
+#   UMP_IOS_DEVICE_UDID   pick one device when several are attached
+#   UMP_IOS_DEVICE_NAME   ... or pick it by name
+#   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
+#   UMP_IOS_CONFIGURATION Release (default) or Debug
+#   UMP_IOS_LAUNCH=0      install only, do not start the app
+# ============================================================
+
+echo "========================================"
+echo "[PEARZ] iOS install on device"
+echo "========================================"
+
+if [ -z "${WORKSPACE:-}" ]; then
+    echo "[PEARZ] ERROR: WORKSPACE is not defined."
+    exit 1
+fi
+
+PROJECT="$WORKSPACE/Builds/iOS/Unity-iPhone.xcodeproj"
+DERIVED="$WORKSPACE/Builds/iOSDerived"
+CONFIGURATION="${UMP_IOS_CONFIGURATION:-Release}"
+
+if [ ! -d "$PROJECT" ]; then
+    echo "[PEARZ] ERROR: Xcode project not found:"
+    echo "$PROJECT"
+    echo "[PEARZ] Run the Unity iOS build first."
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Scheme
+# ------------------------------------------------------------
+
+SCHEME="${IOS_SCHEME:-}"
+
+if [ -z "$SCHEME" ]; then
+
+    SCHEME="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
+        | awk '/Schemes:/ {found=1; next} found && NF {print $1; exit}')"
+fi
+
+[ -n "$SCHEME" ] || SCHEME="Unity-iPhone"
+
+echo "[PEARZ] Scheme        : $SCHEME"
+echo "[PEARZ] Configuration : $CONFIGURATION"
+
+# ------------------------------------------------------------
+# Device
+#
+# xctrace lists physical devices as
+#   <name> (<ios version>) (<udid>)
+# while the host Mac has no version, which is what separates
+# them. Offline devices sit in their own section.
+# ------------------------------------------------------------
+
+DEVICE_LINES="$(xcrun xctrace list devices 2>/dev/null \
+    | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
+    | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
+
+UDID="${UMP_IOS_DEVICE_UDID:-}"
+
+if [ -z "$UDID" ] && [ -n "${UMP_IOS_DEVICE_NAME:-}" ]; then
+
+    DEVICE_LINES="$(echo "$DEVICE_LINES" \
+        | grep -F "$UMP_IOS_DEVICE_NAME" || true)"
+fi
+
+if [ -z "$UDID" ]; then
+
+    if [ -z "$DEVICE_LINES" ]; then
+
+        echo "[PEARZ] ERROR: no iOS device detected."
+        echo "[PEARZ] Check that the device is plugged in, unlocked,"
+        echo "[PEARZ] and that it trusts this Mac."
+        echo "[PEARZ] Devices seen by Xcode:"
+        xcrun xctrace list devices 2>/dev/null || true
+        exit 1
+    fi
+
+    COUNT="$(echo "$DEVICE_LINES" | grep -c . || true)"
+
+    if [ "$COUNT" -gt 1 ]; then
+        echo "[PEARZ] Several devices attached:"
+        echo "$DEVICE_LINES"
+        echo "[PEARZ] Using the first one."
+        echo "[PEARZ] Set UMP_IOS_DEVICE_UDID or UMP_IOS_DEVICE_NAME to choose."
+    fi
+
+    DEVICE_LINE="$(echo "$DEVICE_LINES" | head -n 1)"
+
+    UDID="$(echo "$DEVICE_LINE" \
+        | sed -E 's/.*\(([0-9A-Za-z-]+)\)[[:space:]]*$/\1/')"
+
+    DEVICE_NAME="$(echo "$DEVICE_LINE" \
+        | sed -E 's/ \([^)]*\) \([^)]*\)[[:space:]]*$//')"
+
+    echo "[PEARZ] Device       : $DEVICE_NAME"
+fi
+
+echo "[PEARZ] Device UDID  : $UDID"
+
+# ------------------------------------------------------------
+# Build for that device
+# ------------------------------------------------------------
+
+BUILD_ARGS=(
+    -project "$PROJECT"
+    -scheme "$SCHEME"
+    -configuration "$CONFIGURATION"
+    -destination "id=$UDID"
+    -derivedDataPath "$DERIVED"
+    -allowProvisioningUpdates
+)
+
+if [ -n "${UMP_IOS_TEAM_ID:-}" ]; then
+
+    echo "[PEARZ] Team         : $UMP_IOS_TEAM_ID (UMP_IOS_TEAM_ID)"
+
+    BUILD_ARGS+=(
+        "DEVELOPMENT_TEAM=$UMP_IOS_TEAM_ID"
+        "CODE_SIGN_STYLE=Automatic"
+    )
+
+else
+
+    # Unity writes the team from Player Settings into the project.
+    # Say so early rather than let xcodebuild fail on signing.
+    PROJECT_TEAM="$(xcodebuild -showBuildSettings \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" 2>/dev/null \
+        | awk -F' = ' '/ DEVELOPMENT_TEAM = / {print $2; exit}' \
+        | tr -d ' \r' || true)"
+
+    if [ -n "$PROJECT_TEAM" ]; then
+
+        echo "[PEARZ] Team         : $PROJECT_TEAM (Player Settings)"
+
+    else
+
+        echo "[PEARZ] WARNING: no signing team in the Xcode project."
+        echo "[PEARZ] Set it in Unity: Player Settings -> iOS ->"
+        echo "[PEARZ] Identification -> Signing Team ID, and tick"
+        echo "[PEARZ] Automatically Sign. A free Apple ID works:"
+        echo "[PEARZ] sign in to Xcode once on this Mac, the personal"
+        echo "[PEARZ] team lets the app run 7 days on the device."
+        echo "[PEARZ] Or set UMP_IOS_TEAM_ID in Jenkins."
+    fi
+fi
+
+rm -rf "$DERIVED"
+
+xcodebuild "${BUILD_ARGS[@]}" build
+
+# ------------------------------------------------------------
+# Locate the .app
+# ------------------------------------------------------------
+
+APP="$(find "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" \
+    -maxdepth 1 \
+    -type d \
+    -name "*.app" \
+    2>/dev/null | head -n 1 || true)"
+
+if [ -z "$APP" ]; then
+    echo "[PEARZ] ERROR: built .app not found under"
+    echo "$DERIVED/Build/Products/$CONFIGURATION-iphoneos"
+    exit 1
+fi
+
+echo "[PEARZ] App          : $APP"
+
+# ------------------------------------------------------------
+# Install
+# ------------------------------------------------------------
+
+INSTALLED=0
+
+if xcrun devicectl --version >/dev/null 2>&1; then
+
+    echo "[PEARZ] Installing with devicectl..."
+
+    if xcrun devicectl device install app \
+        --device "$UDID" \
+        "$APP"; then
+
+        INSTALLED=1
+    fi
+fi
+
+if [ "$INSTALLED" -eq 0 ] && command -v ios-deploy >/dev/null 2>&1; then
+
+    echo "[PEARZ] Installing with ios-deploy..."
+
+    if ios-deploy --id "$UDID" --bundle "$APP" --no-wifi; then
+        INSTALLED=1
+    fi
+fi
+
+if [ "$INSTALLED" -eq 0 ]; then
+    echo "[PEARZ] ERROR: install failed."
+    echo "[PEARZ] Unlock the device and accept the trust prompt,"
+    echo "[PEARZ] or install ios-deploy: brew install ios-deploy"
+    exit 1
+fi
+
+echo "[PEARZ] Installed on $UDID"
+
+# ------------------------------------------------------------
+# Launch (best effort)
+# ------------------------------------------------------------
+
+if [ "${UMP_IOS_LAUNCH:-1}" != "0" ]; then
+
+    BUNDLE_ID="$(/usr/libexec/PlistBuddy \
+        -c "Print :CFBundleIdentifier" \
+        "$APP/Info.plist" 2>/dev/null || true)"
+
+    if [ -n "$BUNDLE_ID" ]; then
+
+        echo "[PEARZ] Launching $BUNDLE_ID..."
+
+        xcrun devicectl device process launch \
+            --device "$UDID" \
+            "$BUNDLE_ID" || \
+            echo "[PEARZ] Launch skipped (install still succeeded)."
+    fi
+fi
+
+echo "========================================"
+echo "[PEARZ] iOS device install finished"
+echo "========================================"

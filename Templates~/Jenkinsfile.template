@@ -213,7 +213,11 @@ pipeline {
                 sh '''
                     chmod +x Jenkins/find_unity.sh
                     chmod +x Jenkins/build_ios.sh
+                    chmod +x Jenkins/install_ios_device.sh
+
                     ./Jenkins/build_ios.sh
+
+                    ./Jenkins/install_ios_device.sh
                 '''
             }
         }

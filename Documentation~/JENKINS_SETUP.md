@@ -1,4 +1,4 @@
-# UMP Jenkins Setup 1.10.0
+# UMP Jenkins Setup 1.11.1
 
 ## Install / sync
 
@@ -15,7 +15,7 @@ Commit the generated files.
 Branches:
 - release/android -> AAB
 - release/android-test -> APK
-- release/ios-test -> iOS Xcode project for device testing
+- release/ios-test -> build and install on the device attached to the Mac
 - release/ios -> Archive/Export + TestFlight
 
 Create a Multibranch Pipeline, connect the Git repository, use Jenkinsfile at project root, and optionally filter `release/(android|android-test|ios-test|ios)`.
@@ -322,4 +322,63 @@ and bind them in the `Drive Upload` stage of the Jenkinsfile the same way the se
 Uploads use the Drive v3 resumable flow in 8 MB chunks with `supportsAllDrives=true`, so large APK/AAB files stream instead of being buffered whole. A failed Drive upload never fails the Jenkins build.
 
 ## iOS
-Configure Xcode signing on the Jenkins Mac and verify manual Archive/Export/Upload before CI. No Apple password is stored in UMP. The Xcode scheme is read from the generated project; set `IOS_SCHEME` in Jenkins only to override it.
+
+Configure Xcode signing on the Jenkins Mac and verify manual
+Archive/Export/Upload before CI. No Apple password is stored in UMP. The
+Xcode scheme is read from the generated project; set `IOS_SCHEME` in
+Jenkins only to override it.
+
+### release/ios-test - install on the attached device
+
+The branch does three things: Unity generates the Xcode project,
+`xcodebuild` compiles it for the attached device, and the `.app` is
+installed on it (and launched).
+
+Requirements on the Mac:
+
+- The device is plugged in, **unlocked**, and has trusted this Mac
+- Xcode is signed in to an Apple Developer account whose provisioning
+  profile includes that device's UDID
+- `xcrun devicectl` (Xcode 15+) handles the install; `ios-deploy`
+  (`brew install ios-deploy`) is used as a fallback for older setups
+
+### Signing team
+
+The Team ID is a 10-character string like `A1B2C3D4E5`. It is **not a
+secret** - it is embedded in every build - so it belongs in *Manage Jenkins
+-> System -> Global properties -> Environment variables*, **not** in
+Credentials. A credential would not even reach the script: the Jenkinsfile
+never binds it.
+
+The better place is the project itself: *Player Settings -> iOS ->
+Identification -> Signing Team ID* with *Automatically Sign* ticked. Unity
+writes it into the Xcode project, the value travels with the repo like the
+Android keystore, and `UMP_IOS_TEAM_ID` stays unset. Use the env var only
+to override every project at once.
+
+**No paid Apple Developer account?** A free Apple ID is enough for
+`release/ios-test`: sign in to Xcode once on the Jenkins Mac (Settings ->
+Accounts -> +), which creates a *Personal Team*. Its Team ID is shown in
+Xcode -> Project -> Signing & Capabilities after selecting the team; put
+that in Player Settings. Limits: the app stops running after **7 days**,
+max 3 apps per device, and no push notifications, IAP or Game Center. Good
+enough to hand a build to a tester, not for TestFlight (`release/ios`
+needs a paid account).
+
+The install script prints which team it is using, and warns before
+`xcodebuild` runs when the project has none.
+
+Optional Jenkins env vars:
+
+| Variable | Meaning |
+| --- | --- |
+| `UMP_IOS_TEAM_ID` | override the Player Settings team for every project |
+| `UMP_IOS_DEVICE_UDID` | pick one device when several are attached |
+| `UMP_IOS_DEVICE_NAME` | ... or pick it by name |
+| `UMP_IOS_CONFIGURATION` | `Release` (default) or `Debug` |
+| `UMP_IOS_LAUNCH=0` | install only, do not start the app |
+
+The device list comes from `xcrun xctrace list devices`; only physical,
+online devices are considered. With no device attached the stage fails
+with the list of what Xcode can actually see, instead of reporting a
+success that installed nothing.
