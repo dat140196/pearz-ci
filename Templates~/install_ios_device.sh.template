@@ -8,14 +8,23 @@ set -euo pipefail
 # Used by release/ios-test.
 #
 # Optional Jenkins env vars:
-#   UMP_IOS_DEVICE_UDID   pick one device when several are attached
+#   UMP_IOS_DEVICE_UDID   pick one device when several are
+#                         attached, and skip detection entirely
 #   UMP_IOS_DEVICE_NAME   ... or pick it by name
+#   UMP_IOS_DEVICE_TIMEOUT
+#                         seconds to wait for the device to appear
+#                         after the Unity build (60)
 #   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
 #   UMP_IOS_CONFIGURATION Release (default) or Debug
 #   UMP_IOS_LAUNCH=0      install only, do not start the app
 #   UMP_KEYCHAIN_PASSWORD login password of the build user, to
 #                         unlock the keychain Xcode keeps its
 #                         account token in
+#   UMP_IOS_STRIP_CAPABILITIES
+#                         capabilities to delete from the exported
+#                         project before building, when the team
+#                         cannot sign them (empty by default, so
+#                         the Xcode setup on this Mac is kept)
 # ============================================================
 
 echo "========================================"
@@ -124,29 +133,93 @@ BUNDLE_ID="$(echo "$SETTINGS" \
 #   <name> (<ios version>) (<udid>)
 # while the host Mac has no version, which is what separates
 # them. Offline devices sit in their own section.
+#
+# The Unity build that ran a moment ago held a usbmuxd session of
+# its own and tears it down as the editor exits, and a device
+# still plugged in reads as offline for a few seconds afterwards.
+# Waiting costs nothing when the device is already there.
 # ------------------------------------------------------------
 
-DEVICE_LINES="$(xcrun xctrace list devices 2>/dev/null \
-    | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
-    | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
+list_devices() {
+
+    local lines
+
+    lines="$(xcrun xctrace list devices 2>/dev/null \
+        | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
+        | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
+
+    if [ -n "${UMP_IOS_DEVICE_NAME:-}" ]; then
+
+        lines="$(echo "$lines" | grep -F "$UMP_IOS_DEVICE_NAME" || true)"
+    fi
+
+    echo "$lines"
+}
 
 UDID="${UMP_IOS_DEVICE_UDID:-}"
 
-if [ -z "$UDID" ] && [ -n "${UMP_IOS_DEVICE_NAME:-}" ]; then
-
-    DEVICE_LINES="$(echo "$DEVICE_LINES" \
-        | grep -F "$UMP_IOS_DEVICE_NAME" || true)"
-fi
-
 if [ -z "$UDID" ]; then
+
+    DEVICE_LINES="$(list_devices)"
+
+    WAIT_FOR="${UMP_IOS_DEVICE_TIMEOUT:-60}"
+    WAITED=0
+
+    while [ -z "$DEVICE_LINES" ] && [ "$WAITED" -lt "$WAIT_FOR" ]; do
+
+        if [ "$WAITED" -eq 0 ]; then
+            echo "[PEARZ] No device yet - waiting up to ${WAIT_FOR}s for it"
+            echo "[PEARZ] to come back after the Unity build."
+        fi
+
+        sleep 3
+
+        WAITED=$((WAITED + 3))
+
+        DEVICE_LINES="$(list_devices)"
+    done
+
+    if [ -n "$DEVICE_LINES" ] && [ "$WAITED" -gt 0 ]; then
+        echo "[PEARZ] Device showed up after ${WAITED}s."
+    fi
 
     if [ -z "$DEVICE_LINES" ]; then
 
         echo "[PEARZ] ERROR: no iOS device detected."
-        echo "[PEARZ] Check that the device is plugged in, unlocked,"
-        echo "[PEARZ] and that it trusts this Mac."
+
+        # A device that is paired but locked, unplugged or asleep
+        # is listed under its own heading rather than missing, and
+        # that says which of the two problems this is.
+        OFFLINE="$(xcrun xctrace list devices 2>/dev/null \
+            | awk '/^== Devices Offline ==/ {found=1; next} /^== / {found=0} found {print}' \
+            | grep -E '\([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
+
+        if [ -n "$OFFLINE" ]; then
+
+            echo "[PEARZ] Paired with this Mac but offline after"
+            echo "[PEARZ] ${WAITED}s of waiting:"
+            echo "$OFFLINE" | sed 's|^|[PEARZ]   |'
+            echo "[PEARZ] With the cable in and the phone unlocked,"
+            echo "[PEARZ] this is usually the Mac keeping the device"
+            echo "[PEARZ] busy: quit Xcode and any Unity editor on the"
+            echo "[PEARZ] build Mac, or unplug and plug the cable once."
+            echo "[PEARZ] Set UMP_IOS_DEVICE_UDID to skip detection and"
+            echo "[PEARZ] let xcodebuild talk to the device directly."
+
+        else
+
+            echo "[PEARZ] Check that the device is plugged in, unlocked,"
+            echo "[PEARZ] and that it trusts this Mac."
+        fi
+
         echo "[PEARZ] Devices seen by Xcode:"
         xcrun xctrace list devices 2>/dev/null || true
+
+        # xctrace and devicectl ask different services, so a device
+        # missing from one is often listed by the other.
+        echo "[PEARZ] Devices seen by devicectl:"
+        xcrun devicectl list devices 2>/dev/null || true
+
         exit 1
     fi
 
@@ -517,16 +590,19 @@ fi
 # ------------------------------------------------------------
 # Strip capabilities a test build cannot sign
 #
-# A free Personal Team is not allowed to use In-App Purchase,
-# push notifications and friends, so provisioning fails with
-# "No profiles for ... were found". The generated Xcode project
-# lives in Builds/ and is rebuilt every time, so editing it here
-# changes nothing in the repo - the game code is untouched.
+# Off by default. The Unity build appends to the Xcode project
+# instead of replacing it, so Signing & Capabilities is whatever
+# was set up in Xcode on this Mac - deleting a capability here
+# would undo that on every build.
 #
-# UMP_IOS_STRIP_CAPABILITIES="" keeps everything (paid team).
+# Set UMP_IOS_STRIP_CAPABILITIES=com.apple.InAppPurchase when the
+# team signing the build cannot carry a capability the project
+# asks for. A free Personal Team is never given In-App Purchase,
+# and provisioning then fails with "Personal development teams
+# ... do not support the In-App Purchase capability".
 # ------------------------------------------------------------
 
-STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
+STRIP="${UMP_IOS_STRIP_CAPABILITIES:-}"
 
 PROJECT_DIR="$(dirname "$PROJECT")"
 

@@ -46,17 +46,58 @@ public static class JenkinsBuild
         // Xcode project path on the same build machine.
         string output = "Builds/iOS/" + Sanitize(PlayerSettings.productName);
 
-        Prepare(output);
+        // Appending leaves everything set up in Xcode by hand in
+        // place - signing team, provisioning, In-App Purchase and
+        // the rest of Signing & Capabilities - and rewrites only
+        // the code and data Unity owns. A fresh export throws all
+        // of that away on every build, which is why the device
+        // build kept losing its signing setup.
+        //
+        // The first build has nothing to append to, and
+        // UMP_IOS_CLEAN=1 forces the export back to a clean one.
+        bool append =
+            Env("UMP_IOS_CLEAN") != "1" &&
+            Directory.Exists(output + "/Unity-iPhone.xcodeproj");
+
+        if (append)
+            Directory.CreateDirectory(output);
+        else
+            Prepare(output);
+
+        UnityEngine.Debug.Log(
+            "[UMP] iOS export: " + (append ? "append" : "clean"));
 
         var options = new BuildPlayerOptions
         {
             scenes = GetEnabledScenes(),
             locationPathName = output,
             target = BuildTarget.iOS,
-            options = BuildOptions.None
+            options = append
+                ? BuildOptions.AcceptExternalModificationsToPlayer
+                : BuildOptions.None
         };
 
-        Check(BuildPipeline.BuildPlayer(options));
+        // Appending only works on a project this Unity version
+        // wrote. After a Unity upgrade, or if Xcode rewrote the
+        // project in a way Unity cannot read, the append fails -
+        // and a build that stops here leaves nothing to install.
+        try
+        {
+            Check(BuildPipeline.BuildPlayer(options));
+        }
+        catch (Exception e) when (append)
+        {
+            UnityEngine.Debug.LogWarning(
+                "[UMP] Append failed (" + e.Message + "), exporting a " +
+                "clean Xcode project. Signing & Capabilities set up in " +
+                "Xcode is gone and has to be set up once more.");
+
+            Prepare(output);
+
+            options.options = BuildOptions.None;
+
+            Check(BuildPipeline.BuildPlayer(options));
+        }
 
         WriteBuildInfo(output);
 

@@ -3,6 +3,10 @@ set -euo pipefail
 
 # ============================================================
 # PEARZ iOS Build -> Xcode project in Builds/iOS
+#
+# Unity appends to an Xcode project that is already there, so
+# Signing & Capabilities set up by hand in Xcode survives every
+# build. UMP_IOS_CLEAN=1 exports from scratch instead.
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,6 +29,12 @@ echo "[PEARZ] UMP        : @UMP_VERSION@"
 echo "[PEARZ] Unity Path : $UNITY_PATH"
 echo "[PEARZ] Branch     : ${BRANCH_NAME:-unknown}"
 echo "[PEARZ] Workspace  : $WORKSPACE"
+
+if [ "${UMP_IOS_CLEAN:-0}" = "1" ]; then
+    echo "[PEARZ] Export     : clean (UMP_IOS_CLEAN=1)"
+else
+    echo "[PEARZ] Export     : append to the existing Xcode project"
+fi
 
 "$UNITY_PATH" \
     -batchmode \
