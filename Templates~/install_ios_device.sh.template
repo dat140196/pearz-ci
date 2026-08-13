@@ -126,6 +126,8 @@ BUNDLE_ID="$(echo "$SETTINGS" \
 
 [ -n "$BUNDLE_ID" ] && echo "[PEARZ] Bundle id    : $BUNDLE_ID"
 
+PBXPROJ="$PROJECT/project.pbxproj"
+
 # ------------------------------------------------------------
 # Device
 #
@@ -713,8 +715,6 @@ DECLARED
 
 if [ -n "$STRIP" ]; then
 
-    PBXPROJ="$PROJECT/project.pbxproj"
-
     STRIPPED_BY_NAME=0
 
     for capability in $STRIP; do
@@ -869,25 +869,33 @@ if [ "$BUILD_OK" -eq 0 ]; then
 
         echo "[PEARZ]"
         echo "[PEARZ] --- capability not signable by this team ---"
-        echo "[PEARZ] Team $TEAM is a free Personal Team. Apple does not"
-        echo "[PEARZ] issue development profiles with In-App Purchase for"
-        echo "[PEARZ] one, and the capability survived both the project"
-        echo "[PEARZ] cleanup and the build without entitlements."
+        echo "[PEARZ] Team $TEAM is a free Personal Team, and Apple does"
+        echo "[PEARZ] not issue one a development profile carrying"
+        echo "[PEARZ] In-App Purchase."
         echo "[PEARZ]"
-        echo "[PEARZ] The profile named above is the one Xcode already"
-        echo "[PEARZ] holds for this bundle id. It cannot be reused by"
-        echo "[PEARZ] hand - Xcode-managed profiles are refused under"
-        echo "[PEARZ] manual signing - so the capability has to be gone"
-        echo "[PEARZ] before xcodebuild starts."
+        echo "[PEARZ] The exported project asks for no such capability -"
+        echo "[PEARZ] the block printed above is all it declares, and"
+        echo "[PEARZ] there is no entitlements file. So this comes from"
+        echo "[PEARZ] Apple's side: the App ID behind $BUNDLE_ID"
+        echo "[PEARZ] carries In-App Purchase, and every profile Xcode"
+        echo "[PEARZ] asks for has to match it. Nothing this script can"
+        echo "[PEARZ] delete from the project changes that."
         echo "[PEARZ]"
-        echo "[PEARZ] The fix is an Apple Developer Program team:"
-        echo "[PEARZ] sign that Apple ID in to Xcode -> Settings ->"
-        echo "[PEARZ] Accounts and set UMP_IOS_TEAM_ID to its team id."
-        echo "[PEARZ] A paid team signs In-App Purchase, so no stripping"
-        echo "[PEARZ] happens and the device build matches the store one."
+        echo "[PEARZ] Two ways out:"
         echo "[PEARZ]"
-        echo "[PEARZ] Without one, turn Unity IAP off in the build used"
-        echo "[PEARZ] by release/ios-test."
+        echo "[PEARZ]  - An Apple Developer Program team. Sign that"
+        echo "[PEARZ]    Apple ID in to Xcode -> Settings -> Accounts"
+        echo "[PEARZ]    and set UMP_IOS_TEAM_ID to its team id. It"
+        echo "[PEARZ]    signs In-App Purchase, so the device build"
+        echo "[PEARZ]    matches what ships."
+        echo "[PEARZ]"
+        echo "[PEARZ]  - A bundle id no App ID exists for yet, e.g."
+        echo "[PEARZ]    $BUNDLE_ID.test, in Player Settings ->"
+        echo "[PEARZ]    iOS -> Identification, committed on this"
+        echo "[PEARZ]    branch only. A fresh App ID carries no"
+        echo "[PEARZ]    capability, so a Personal Team can sign it."
+        echo "[PEARZ]    Run once with UMP_IOS_CLEAN=1 afterwards so"
+        echo "[PEARZ]    the Xcode project is exported from scratch."
         echo "[PEARZ]"
     fi
 
