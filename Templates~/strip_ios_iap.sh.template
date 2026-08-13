@@ -2,24 +2,25 @@
 set -euo pipefail
 
 # ============================================================
-# PEARZ iOS device build - remove local IAP capability metadata
-# and isolate the Personal Team test build from the production
-# App ID by using a dedicated bundle id.
+# PEARZ iOS device build - final IAP cleanup/verification.
 #
 # Runs AFTER Unity export and BEFORE xcodebuild.
 #
-# Default on release/ios-test:
-#   com.company.game -> com.company.game.device
+# Unity's JenkinsBuild.cs removes StoreKit.framework from the
+# Unity-iPhone app target while intentionally keeping StoreKit on
+# UnityFramework. This script then removes any remaining literal
+# In-App Purchase capability marker from project.pbxproj and verifies
+# that signing/bundle-id settings were not changed.
 #
-# Overrides:
+# Optional env vars:
 #   UMP_IOS_PROJECT=/path/to/Unity-iPhone.xcodeproj
-#   UMP_IOS_DEVICE_BUNDLE_ID=com.company.game.mydevice
-#   UMP_IOS_KEEP_BUNDLE_ID=1      # do not change bundle id
+#   IOS_SCHEME=Unity-iPhone
+#   UMP_IOS_CONFIGURATION=Release
 #   UMP_IOS_STRIP_BRANCH=""       # allow any branch
 # ============================================================
 
 echo "========================================"
-echo "[PEARZ] iOS device project fix"
+echo "[PEARZ] iOS IAP final cleanup"
 echo "[PEARZ] UMP @UMP_VERSION@"
 echo "========================================"
 
@@ -77,11 +78,24 @@ signing_state() {
         "$PBXPROJ" 2>/dev/null | sort -u || true
 }
 
+show_build_settings() {
+    xcodebuild -showBuildSettings \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" \
+        -configuration "$CONFIGURATION" \
+        2>/dev/null || true
+}
+
 SIGNING_BEFORE="$(signing_state)"
+SETTINGS_BEFORE="$(show_build_settings)"
+BUNDLE_BEFORE="$(echo "$SETTINGS_BEFORE" \
+    | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
+    | tr -d ' \r' || true)"
 
 echo "[PEARZ] Project       : $PROJECT"
 echo "[PEARZ] Scheme        : $SCHEME"
 echo "[PEARZ] Configuration : $CONFIGURATION"
+echo "[PEARZ] Bundle id     : ${BUNDLE_BEFORE:-<unknown>}"
 
 if [ -n "$SIGNING_BEFORE" ]; then
     echo "[PEARZ] Signing before:"
@@ -89,11 +103,11 @@ if [ -n "$SIGNING_BEFORE" ]; then
 fi
 
 # ------------------------------------------------------------
-# 1) Remove the local Xcode capability marker if Unity or a
-# package wrote it. This mirrors the project-file part of pressing
-# '-' on In-App Purchase in Signing & Capabilities.
+# Remove only the literal Xcode capability marker. Do not change
+# PRODUCT_BUNDLE_IDENTIFIER and do not remove Unity IAP source files.
 # ------------------------------------------------------------
-IAP_BEFORE="$(grep -nE 'com\.apple\.InAppPurchase|In-App Purchase' "$PBXPROJ" 2>/dev/null || true)"
+IAP_BEFORE="$(grep -nE 'com\.apple\.InAppPurchase|In-App Purchase' \
+    "$PBXPROJ" 2>/dev/null || true)"
 
 if [ -n "$IAP_BEFORE" ]; then
     echo "[PEARZ] Local IAP metadata before:"
@@ -114,93 +128,25 @@ fi
 
 echo "[PEARZ] Local IAP capability marker: absent."
 
-# ------------------------------------------------------------
-# 2) Resolve the app target bundle id.
-# ------------------------------------------------------------
-SETTINGS="$(xcodebuild -showBuildSettings \
-    -project "$PROJECT" \
-    -scheme "$SCHEME" \
-    -configuration "$CONFIGURATION" \
-    2>/dev/null || true)"
-
-BUNDLE_ID="$(echo "$SETTINGS" \
-    | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
-    | tr -d ' \r' || true)"
-
-if [ -z "$BUNDLE_ID" ]; then
-    BUNDLE_ID="$(grep -hoE 'PRODUCT_BUNDLE_IDENTIFIER[ \t]*=[ \t]*"?[A-Za-z0-9._-]+"?;' \
-        "$PBXPROJ" 2>/dev/null \
-        | sed -E 's/.*=[ \t]*"?([^";]+)"?;.*/\1/' \
-        | grep -v '^com\.unity3d\.' \
-        | head -n 1 || true)"
-fi
-
-if [ -z "$BUNDLE_ID" ]; then
-    echo "[PEARZ] ERROR: cannot determine app bundle id."
-    exit 1
-fi
-
-echo "[PEARZ] Original bundle id: $BUNDLE_ID"
-
-# ------------------------------------------------------------
-# 3) Personal Team isolation.
-#
-# The production App ID can keep In-App Purchase enabled on
-# Apple's signing side even when the exported pbxproj has no IAP
-# marker. release/ios-test therefore gets its own stable App ID.
-# This does not touch PlayerSettings or the release/ios workspace.
-# ------------------------------------------------------------
-DEVICE_BUNDLE_ID="$BUNDLE_ID"
-
-if [ "${UMP_IOS_KEEP_BUNDLE_ID:-0}" != "1" ]; then
-    if [ -n "${UMP_IOS_DEVICE_BUNDLE_ID:-}" ]; then
-        DEVICE_BUNDLE_ID="$UMP_IOS_DEVICE_BUNDLE_ID"
-    else
-        case "$BUNDLE_ID" in
-            *.device) DEVICE_BUNDLE_ID="$BUNDLE_ID" ;;
-            *) DEVICE_BUNDLE_ID="${BUNDLE_ID}.device" ;;
-        esac
-    fi
-fi
-
-if [ "$DEVICE_BUNDLE_ID" != "$BUNDLE_ID" ]; then
-    echo "[PEARZ] Device bundle id  : $DEVICE_BUNDLE_ID"
-
-    OLD_BUNDLE_ID="$BUNDLE_ID" \
-    NEW_BUNDLE_ID="$DEVICE_BUNDLE_ID" \
-    perl -pi -e '
-        if (/PRODUCT_BUNDLE_IDENTIFIER\s*=/ && index($_, $ENV{"OLD_BUNDLE_ID"}) >= 0) {
-            s/\Q$ENV{"OLD_BUNDLE_ID"}\E/$ENV{"NEW_BUNDLE_ID"}/g;
-        }
-    ' "$PBXPROJ"
-else
-    echo "[PEARZ] Device bundle id  : unchanged"
-fi
-
-# Xcode must still be able to parse the project after our edits.
+# Xcode must still be able to parse the edited project.
 if ! xcodebuild -list -project "$PROJECT" >/dev/null 2>&1; then
     echo "[PEARZ] ERROR: Xcode cannot parse the edited project."
     exit 1
 fi
 
-SETTINGS_AFTER="$(xcodebuild -showBuildSettings \
-    -project "$PROJECT" \
-    -scheme "$SCHEME" \
-    -configuration "$CONFIGURATION" \
-    2>/dev/null || true)"
-
+SETTINGS_AFTER="$(show_build_settings)"
 BUNDLE_AFTER="$(echo "$SETTINGS_AFTER" \
     | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
     | tr -d ' \r' || true)"
+SIGNING_AFTER="$(signing_state)"
 
-if [ "$BUNDLE_AFTER" != "$DEVICE_BUNDLE_ID" ]; then
-    echo "[PEARZ] ERROR: bundle id patch did not take effect."
-    echo "[PEARZ] Expected: $DEVICE_BUNDLE_ID"
-    echo "[PEARZ] Actual  : ${BUNDLE_AFTER:-<empty>}"
+if [ -n "$BUNDLE_BEFORE" ] && [ "$BUNDLE_AFTER" != "$BUNDLE_BEFORE" ]; then
+    echo "[PEARZ] ERROR: bundle id changed unexpectedly."
+    echo "[PEARZ] Before: $BUNDLE_BEFORE"
+    echo "[PEARZ] After : ${BUNDLE_AFTER:-<empty>}"
     exit 1
 fi
 
-SIGNING_AFTER="$(signing_state)"
 if [ "$SIGNING_BEFORE" != "$SIGNING_AFTER" ]; then
     echo "[PEARZ] ERROR: signing settings changed unexpectedly."
     echo "[PEARZ] Before:"
@@ -210,18 +156,37 @@ if [ "$SIGNING_BEFORE" != "$SIGNING_AFTER" ]; then
     exit 1
 fi
 
-# Diagnostic only. StoreKit may remain linked because the game
-# still contains Unity IAP code; that is not the Xcode capability
-# marker this script removes.
-echo "[PEARZ] Remaining StoreKit references (diagnostic):"
-grep -nEi 'StoreKit|InAppPurchase|In-App Purchase' "$PBXPROJ" \
-    | head -n 30 \
+# Count PBXBuildFile declarations, not all comment occurrences. A single
+# framework membership is referenced twice textually in a pbxproj (object
+# declaration + build-phase child), so counting comments would be wrong.
+# For the device build we expect at most one StoreKit PBXBuildFile: the
+# UnityFramework membership intentionally preserved by JenkinsBuild.cs.
+STOREKIT_BUILD_COUNT="$(grep -Ec 'isa = PBXBuildFile;.*StoreKit\.framework' \
+    "$PBXPROJ" 2>/dev/null || true)"
+STOREKIT_BUILD_COUNT="${STOREKIT_BUILD_COUNT:-0}"
+
+echo "[PEARZ] StoreKit PBXBuildFile entries: $STOREKIT_BUILD_COUNT"
+grep -nE 'isa = PBXBuildFile;.*StoreKit\.framework' "$PBXPROJ" \
+    | head -n 20 \
     | sed 's/^/[PEARZ]   /' || true
 
-echo "[PEARZ] Verified bundle id : $BUNDLE_AFTER"
+if [ "$STOREKIT_BUILD_COUNT" -gt 1 ]; then
+    echo "[PEARZ] ERROR: StoreKit.framework is still linked by more than one target."
+    echo "[PEARZ] The Unity post-export cleanup did not remove it from Unity-iPhone."
+    echo "[PEARZ] Check for this Unity log line:"
+    echo "[PEARZ]   Removed StoreKit.framework from Unity-iPhone target only."
+    exit 1
+fi
+
+echo "[PEARZ] Remaining StoreKit/IAP references (diagnostic only):"
+grep -nEi 'StoreKit|InAppPurchase|In-App Purchase' "$PBXPROJ" \
+    | head -n 40 \
+    | sed 's/^/[PEARZ]   /' || true
+
+echo "[PEARZ] Verified bundle id : ${BUNDLE_AFTER:-<unknown>}"
 echo "[PEARZ] Verified signing   : unchanged"
 echo "========================================"
-echo "[PEARZ] iOS device project fix finished"
+echo "[PEARZ] iOS IAP final cleanup finished"
 echo "========================================"
 
 trap - EXIT

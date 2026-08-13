@@ -7,8 +7,9 @@ set -euo pipefail
 # optionally launch it.
 #
 # Jenkins/strip_ios_iap.sh must run before this script on
-# release/ios-test. That script removes local IAP capability
-# metadata and switches the device build to a dedicated bundle id.
+# release/ios-test. The Unity export step removes StoreKit.framework
+# from the Unity-iPhone app target, and the strip script removes any
+# remaining local IAP capability marker while preserving signing.
 #
 # Optional env vars:
 #   UMP_IOS_PROJECT
@@ -252,10 +253,10 @@ if ! xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG"; then
 
     if grep -q "In-App Purchase capability" "$BUILD_LOG"; then
         echo "[PEARZ] IAP signing is still being requested."
-        echo "[PEARZ] Expected device bundle id: ${BUNDLE_ID:-<unknown>}"
-        echo "[PEARZ] Check Jenkins/strip_ios_iap.sh output immediately above."
-        echo "[PEARZ] For release/ios-test it should end in '.device' unless"
-        echo "[PEARZ] UMP_IOS_KEEP_BUNDLE_ID=1 is explicitly set."
+        echo "[PEARZ] Bundle id: ${BUNDLE_ID:-<unknown>}"
+        echo "[PEARZ] Check the Unity log for:"
+        echo "[PEARZ]   Removed StoreKit.framework from Unity-iPhone target only."
+        echo "[PEARZ] Then check Jenkins/strip_ios_iap.sh diagnostics immediately above."
     fi
 
     if grep -qE 'No Accounts|No profiles for|requires a development team' "$BUILD_LOG"; then

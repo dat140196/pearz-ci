@@ -5,6 +5,10 @@ using System.Text;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 
+#if UNITY_IOS
+using UnityEditor.iOS.Xcode;
+#endif
+
 public static class JenkinsBuild
 {
     // Written next to the artifact so the Jenkins shell scripts
@@ -99,9 +103,61 @@ public static class JenkinsBuild
             Check(BuildPipeline.BuildPlayer(options));
         }
 
+        // release/ios-test uses a Personal Team for direct device builds.
+        // Unity IAP can add StoreKit.framework to both Unity-iPhone and
+        // UnityFramework. Keep it on UnityFramework (where Unity/player
+        // plugin code lives) but remove it from the app target. This
+        // mirrors the target-level framework change made by Xcode when
+        // the IAP capability is removed for the device build.
+        RemoveStoreKitFromDeviceAppTarget(output);
+
         WriteBuildInfo(output);
 
         UnityEngine.Debug.Log("[UMP] iOS Xcode project: " + output);
+    }
+
+    private static void RemoveStoreKitFromDeviceAppTarget(string output)
+    {
+#if UNITY_IOS
+        string branch = Env("BRANCH_NAME");
+        string mode = Env("UMP_IOS_STRIP_IAP");
+
+        // Explicit env wins. Otherwise enable automatically only for the
+        // Jenkins device-test branch used by this pipeline.
+        bool enabled = mode == "1" || (mode.Length == 0 && branch == "release/ios-test");
+
+        if (!enabled)
+        {
+            UnityEngine.Debug.Log(
+                "[UMP] StoreKit app-target cleanup skipped" +
+                (branch.Length > 0 ? " on branch " + branch : ""));
+            return;
+        }
+
+        string pbxPath = PBXProject.GetPBXProjectPath(output);
+        if (!File.Exists(pbxPath))
+            throw new Exception("Xcode project.pbxproj not found: " + pbxPath);
+
+        var project = new PBXProject();
+        project.ReadFromFile(pbxPath);
+
+        string mainTarget = project.GetUnityMainTargetGuid();
+        string frameworkTarget = project.GetUnityFrameworkTargetGuid();
+
+        if (string.IsNullOrEmpty(mainTarget))
+            throw new Exception("Cannot resolve Unity main Xcode target.");
+
+        UnityEngine.Debug.Log("[UMP] iOS main target GUID      : " + mainTarget);
+        UnityEngine.Debug.Log("[UMP] iOS framework target GUID : " + frameworkTarget);
+
+        project.RemoveFrameworkFromProject(mainTarget, "StoreKit.framework");
+        project.WriteToFile(pbxPath);
+
+        UnityEngine.Debug.Log(
+            "[UMP] Removed StoreKit.framework from Unity-iPhone target only.");
+        UnityEngine.Debug.Log(
+            "[UMP] UnityFramework StoreKit dependency is intentionally preserved.");
+#endif
     }
 
     // Unity never generates a release keystore. Without one it signs
