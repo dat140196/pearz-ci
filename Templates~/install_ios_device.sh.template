@@ -13,6 +13,10 @@ set -euo pipefail
 #   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
 #   UMP_IOS_CONFIGURATION Release (default) or Debug
 #   UMP_IOS_LAUNCH=0      install only, do not start the app
+#   UMP_IOS_TEST_BUNDLE_SUFFIX
+#                         appended to the bundle id when the team
+#                         cannot sign the App ID Apple holds for
+#                         the real one ("citest"; "" turns it off)
 # ============================================================
 
 echo "========================================"
@@ -570,6 +574,24 @@ if [ -n "$STRIP" ]; then
     done <<ENTITLEMENTS
 $ENTITLEMENTS_FOUND
 ENTITLEMENTS
+
+    # What the project asks for after the cleanup. When a build
+    # still fails on a capability while this prints nothing, the
+    # capability is attached to the App ID Apple holds for the
+    # bundle id, not to anything Unity exported.
+    CAPABILITIES_LEFT="$(grep -nE \
+        "SystemCapabilities|com\.apple\.[A-Za-z]+ = \{" \
+        "$PBXPROJ" 2>/dev/null || true)"
+
+    if [ -n "$CAPABILITIES_LEFT" ]; then
+
+        echo "[PEARZ] Capabilities still declared in the project:"
+        echo "$CAPABILITIES_LEFT" | sed 's|^|[PEARZ]   |'
+
+    else
+
+        echo "[PEARZ] No capability declared in the Xcode project."
+    fi
 fi
 
 rm -rf "$DERIVED"
@@ -579,6 +601,13 @@ BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodebuild-XXXXXX")"
 BUILD_OK=1
 
 xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+
+capability_refused() {
+
+    grep -qE \
+        "do not support the|does not support the|doesn't include the .*capability" \
+        "$BUILD_LOG"
+}
 
 # A free Personal Team cannot sign In-App Purchase, push and
 # friends: "Personal development teams ... do not support the
@@ -591,9 +620,7 @@ xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
 # test build loses IAP, push and keychain sharing; the App Store
 # path (release/ios) never comes through here, so nothing that
 # ships is affected.
-if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && grep -qE \
-    "do not support the|does not support the|doesn't include the .*capability" \
-    "$BUILD_LOG"; then
+if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
 
     echo "========================================"
     echo "[PEARZ] This team cannot sign a capability the project asks"
@@ -607,6 +634,58 @@ if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && grep -qE \
     xcodebuild "${BUILD_ARGS[@]}" \
         CODE_SIGN_ENTITLEMENTS="" \
         build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+fi
+
+# ------------------------------------------------------------
+# Retry under a bundle id of our own
+#
+# Still refused with nothing left in the project to strip: the
+# capability is on the App ID Apple already holds for this bundle
+# id - registered once by a team that had In-App Purchase - and
+# automatic signing keeps asking for a profile that matches it.
+# A bundle id no App ID exists for starts clean, and a Personal
+# Team can sign that.
+#
+# Only the app target is renamed. UnityFramework is embedded in
+# the app and must keep an id of its own, so the rewrite matches
+# the exact value the app target uses.
+#
+# The app installs under the test id, side by side with any
+# store build already on the device. UMP_IOS_TEST_BUNDLE_SUFFIX=""
+# turns this off.
+# ------------------------------------------------------------
+
+SUFFIX="${UMP_IOS_TEST_BUNDLE_SUFFIX-citest}"
+
+if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && [ -n "$SUFFIX" ] && \
+   [ -n "$BUNDLE_ID" ] && capability_refused; then
+
+    TEST_BUNDLE_ID="$BUNDLE_ID.$SUFFIX"
+
+    echo "========================================"
+    echo "[PEARZ] Nothing left to strip, so the capability belongs to"
+    echo "[PEARZ] the App ID for $BUNDLE_ID."
+    echo "[PEARZ] Retrying as $TEST_BUNDLE_ID - test build only."
+    echo "========================================"
+
+    perl -0pi -e \
+        "s/PRODUCT_BUNDLE_IDENTIFIER = \"?\Q$BUNDLE_ID\E\"?;/PRODUCT_BUNDLE_IDENTIFIER = \"$TEST_BUNDLE_ID\";/g" \
+        "$PBXPROJ"
+
+    if grep -q "$TEST_BUNDLE_ID" "$PBXPROJ" 2>/dev/null; then
+
+        rm -rf "$DERIVED"
+
+        BUILD_OK=1
+
+        xcodebuild "${BUILD_ARGS[@]}" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+
+    else
+
+        echo "[PEARZ] Could not rewrite the bundle id in the project."
+    fi
 fi
 
 if [ "$BUILD_OK" -eq 0 ]; then
@@ -626,16 +705,21 @@ if [ "$BUILD_OK" -eq 0 ]; then
         echo "[PEARZ] --- capability not signable by this team ---"
         echo "[PEARZ] Team $TEAM is a free Personal Team. Apple does not"
         echo "[PEARZ] issue development profiles with In-App Purchase for"
-        echo "[PEARZ] one, and stripping it from the exported project was"
-        echo "[PEARZ] not enough."
+        echo "[PEARZ] one. Stripping the capability, dropping the"
+        echo "[PEARZ] entitlements and moving to a bundle id of our own"
+        echo "[PEARZ] all failed, so this Mac cannot sign the app at all."
         echo "[PEARZ]"
-        echo "[PEARZ] Options:"
-        echo "[PEARZ]  - Turn Unity IAP off in the build used by"
+        echo "[PEARZ] The fix is an Apple Developer Program team:"
+        echo "[PEARZ] sign that Apple ID in to Xcode -> Settings ->"
+        echo "[PEARZ] Accounts and set UMP_IOS_TEAM_ID to its team id."
+        echo "[PEARZ] A paid team signs In-App Purchase, so no stripping"
+        echo "[PEARZ] happens and the device build matches the store one."
+        echo "[PEARZ]"
+        echo "[PEARZ] Without one:"
+        echo "[PEARZ]  - turn Unity IAP off in the build used by"
         echo "[PEARZ]    release/ios-test, or"
-        echo "[PEARZ]  - sign in with an Apple ID in a paid team and set"
-        echo "[PEARZ]    UMP_IOS_TEAM_ID to it, or"
-        echo "[PEARZ]  - add the capability to UMP_IOS_STRIP_CAPABILITIES"
-        echo "[PEARZ]    if the log names another one."
+        echo "[PEARZ]  - add the capability the log names above to"
+        echo "[PEARZ]    UMP_IOS_STRIP_CAPABILITIES."
         echo "[PEARZ]"
     fi
 
