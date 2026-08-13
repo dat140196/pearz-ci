@@ -13,10 +13,6 @@ set -euo pipefail
 #   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
 #   UMP_IOS_CONFIGURATION Release (default) or Debug
 #   UMP_IOS_LAUNCH=0      install only, do not start the app
-#   UMP_IOS_TEST_BUNDLE_SUFFIX
-#                         appended to the bundle id when the team
-#                         cannot sign the App ID Apple holds for
-#                         the real one ("citest"; "" turns it off)
 # ============================================================
 
 echo "========================================"
@@ -168,12 +164,16 @@ PROFILE_DIRS=(
     "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
 )
 
-has_profile_for() {
+# Name of a profile on this Mac that covers the bundle id, which
+# is also what manual signing needs to be handed later on.
+find_profile_for() {
 
     local bundle="$1"
     local dir
     local profile
+    local plist
     local app_id
+    local name
 
     [ -n "$bundle" ] || return 1
 
@@ -185,19 +185,39 @@ has_profile_for() {
 
             [ -f "$profile" ] || continue
 
-            app_id="$(security cms -D -i "$profile" 2>/dev/null \
+            plist="$(security cms -D -i "$profile" 2>/dev/null || true)"
+
+            [ -n "$plist" ] || continue
+
+            app_id="$(echo "$plist" \
                 | plutil -extract Entitlements.application-identifier raw - \
                     2>/dev/null || true)"
 
             [ -n "$app_id" ] || continue
 
+            # A wildcard profile carries no capability of its own,
+            # so it signs this build just as well.
             case "$app_id" in
-                *".$bundle"|*".*") return 0 ;;
+                *".$bundle"|*".*") ;;
+                *) continue ;;
             esac
+
+            name="$(echo "$plist" \
+                | plutil -extract Name raw - 2>/dev/null || true)"
+
+            [ -n "$name" ] || continue
+
+            echo "$name"
+            return 0
         done
     done
 
     return 1
+}
+
+has_profile_for() {
+
+    [ -n "$(find_profile_for "$1" || true)" ]
 }
 
 USING_API_KEY=0
@@ -637,54 +657,62 @@ if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
 fi
 
 # ------------------------------------------------------------
-# Retry under a bundle id of our own
+# Retry with manual signing
 #
-# Still refused with nothing left in the project to strip: the
-# capability is on the App ID Apple already holds for this bundle
-# id - registered once by a team that had In-App Purchase - and
-# automatic signing keeps asking for a profile that matches it.
-# A bundle id no App ID exists for starts clean, and a Personal
-# Team can sign that.
+# "Provisioning profile ... doesn't include the In-App Purchase
+# capability" means the profile for this bundle id already exists
+# on the Mac and is usable - what fails is automatic signing
+# asking Apple for a *new* one that carries In-App Purchase, which
+# a Personal Team is never given.
 #
-# Only the app target is renamed. UnityFramework is embedded in
-# the app and must keep an id of its own, so the rewrite matches
-# the exact value the app target uses.
-#
-# The app installs under the test id, side by side with any
-# store build already on the device. UMP_IOS_TEST_BUNDLE_SUFFIX=""
-# turns this off.
+# Manual signing skips that round trip: xcodebuild signs with the
+# profile already downloaded and never contacts the portal, so
+# nothing asks for the capability. With the entitlements dropped
+# the app has no IAP, which is what a device test build wants
+# anyway. The bundle id stays exactly what Player Settings says.
 # ------------------------------------------------------------
 
-SUFFIX="${UMP_IOS_TEST_BUNDLE_SUFFIX-citest}"
+if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
 
-if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && [ -n "$SUFFIX" ] && \
-   [ -n "$BUNDLE_ID" ] && capability_refused; then
+    PROFILE_NAME="$(find_profile_for "$BUNDLE_ID" || true)"
 
-    TEST_BUNDLE_ID="$BUNDLE_ID.$SUFFIX"
+    if [ -n "$PROFILE_NAME" ]; then
 
-    echo "========================================"
-    echo "[PEARZ] Nothing left to strip, so the capability belongs to"
-    echo "[PEARZ] the App ID for $BUNDLE_ID."
-    echo "[PEARZ] Retrying as $TEST_BUNDLE_ID - test build only."
-    echo "========================================"
-
-    perl -0pi -e \
-        "s/PRODUCT_BUNDLE_IDENTIFIER = \"?\Q$BUNDLE_ID\E\"?;/PRODUCT_BUNDLE_IDENTIFIER = \"$TEST_BUNDLE_ID\";/g" \
-        "$PBXPROJ"
-
-    if grep -q "$TEST_BUNDLE_ID" "$PBXPROJ" 2>/dev/null; then
+        echo "========================================"
+        echo "[PEARZ] Automatic signing keeps asking Apple for a profile"
+        echo "[PEARZ] with In-App Purchase. Retrying with manual signing"
+        echo "[PEARZ] on the profile already on this Mac."
+        echo "[PEARZ] Profile      : $PROFILE_NAME"
+        echo "========================================"
 
         rm -rf "$DERIVED"
 
         BUILD_OK=1
 
-        xcodebuild "${BUILD_ARGS[@]}" \
+        # -allowProvisioningUpdates is what pulls in the portal, so
+        # the manual build is assembled without it.
+        MANUAL_ARGS=()
+
+        for arg in "${BUILD_ARGS[@]}"; do
+
+            case "$arg" in
+                -allowProvisioningUpdates|CODE_SIGN_STYLE=*) continue ;;
+            esac
+
+            MANUAL_ARGS+=("$arg")
+        done
+
+        xcodebuild "${MANUAL_ARGS[@]}" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             CODE_SIGN_ENTITLEMENTS="" \
             build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
 
     else
 
-        echo "[PEARZ] Could not rewrite the bundle id in the project."
+        echo "[PEARZ] No provisioning profile for $BUNDLE_ID on this Mac,"
+        echo "[PEARZ] so manual signing has nothing to sign with."
     fi
 fi
 
@@ -706,8 +734,9 @@ if [ "$BUILD_OK" -eq 0 ]; then
         echo "[PEARZ] Team $TEAM is a free Personal Team. Apple does not"
         echo "[PEARZ] issue development profiles with In-App Purchase for"
         echo "[PEARZ] one. Stripping the capability, dropping the"
-        echo "[PEARZ] entitlements and moving to a bundle id of our own"
-        echo "[PEARZ] all failed, so this Mac cannot sign the app at all."
+        echo "[PEARZ] entitlements and signing manually with the profile"
+        echo "[PEARZ] already here all failed, so this Mac cannot sign"
+        echo "[PEARZ] the app at all."
         echo "[PEARZ]"
         echo "[PEARZ] The fix is an Apple Developer Program team:"
         echo "[PEARZ] sign that Apple ID in to Xcode -> Settings ->"
