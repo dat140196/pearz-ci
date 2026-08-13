@@ -21,10 +21,10 @@ set -euo pipefail
 #                         unlock the keychain Xcode keeps its
 #                         account token in
 #   UMP_IOS_STRIP_CAPABILITIES
-#                         capabilities to delete from the exported
-#                         project before building, when the team
-#                         cannot sign them (empty by default, so
-#                         the Xcode setup on this Mac is kept)
+#                         capabilities to delete from the project
+#                         before building, because the team cannot
+#                         sign them (In-App Purchase by default;
+#                         "" keeps every capability)
 # ============================================================
 
 echo "========================================"
@@ -134,19 +134,90 @@ BUNDLE_ID="$(echo "$SETTINGS" \
 # while the host Mac has no version, which is what separates
 # them. Offline devices sit in their own section.
 #
-# The Unity build that ran a moment ago held a usbmuxd session of
-# its own and tears it down as the editor exits, and a device
-# still plugged in reads as offline for a few seconds afterwards.
-# Waiting costs nothing when the device is already there.
+# xctrace is the old interface though, and it files a perfectly
+# reachable iOS 17+ device under "Offline" - devicectl is asked
+# whenever it comes up empty.
+#
+# Waiting on top of that covers the seconds right after the Unity
+# build, which tears down a usbmuxd session of its own as the
+# editor exits. It costs nothing when the device is already there.
 # ------------------------------------------------------------
+
+list_devices_xctrace() {
+
+    xcrun xctrace list devices 2>/dev/null \
+        | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
+        | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true
+}
+
+# devicectl is the service Xcode 15 and up actually talks to, and
+# it reports devices xctrace files under "Offline" - an iPhone on
+# iOS 17+ is often only visible here. The table it prints carries
+# a CoreDevice UUID rather than the UDID xcodebuild wants, so the
+# UDID is read out of the JSON instead.
+#
+# Printed in the same shape as xctrace, so either source feeds the
+# same parsing below: <name> (<state>) (<udid>)
+list_devices_devicectl() {
+
+    local json
+    local i=0
+    local udid
+    local name
+    local state
+
+    xcrun devicectl --version >/dev/null 2>&1 || return 0
+
+    json="$(mktemp "${TMPDIR:-/tmp}/ump-devices-XXXXXX")"
+
+    if ! xcrun devicectl list devices --json-output "$json" \
+        >/dev/null 2>&1; then
+
+        rm -f "$json"
+        return 0
+    fi
+
+    # plutil cannot count an array, so the list ends where the
+    # extraction stops returning a UDID.
+    while [ "$i" -lt 16 ]; do
+
+        udid="$(plutil -extract "result.devices.$i.hardwareProperties.udid" \
+            raw "$json" 2>/dev/null || true)"
+
+        [ -n "$udid" ] || break
+
+        name="$(plutil -extract "result.devices.$i.deviceProperties.name" \
+            raw "$json" 2>/dev/null || true)"
+
+        state="$(plutil -extract \
+            "result.devices.$i.connectionProperties.pairingState" \
+            raw "$json" 2>/dev/null || true)"
+
+        [ -n "$name" ] || name="iPhone"
+        [ -n "$state" ] || state="unknown"
+
+        echo "$name ($state) ($udid)"
+
+        i=$((i + 1))
+    done
+
+    rm -f "$json"
+}
 
 list_devices() {
 
     local lines
 
-    lines="$(xcrun xctrace list devices 2>/dev/null \
-        | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
-        | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
+    lines="$(list_devices_xctrace)"
+
+    if [ -z "$lines" ]; then
+
+        lines="$(list_devices_devicectl)"
+
+        if [ -n "$lines" ]; then
+            echo "[PEARZ] Device found through devicectl, not xctrace." >&2
+        fi
+    fi
 
     if [ -n "${UMP_IOS_DEVICE_NAME:-}" ]; then
 
@@ -199,12 +270,11 @@ if [ -z "$UDID" ]; then
             echo "[PEARZ] Paired with this Mac but offline after"
             echo "[PEARZ] ${WAITED}s of waiting:"
             echo "$OFFLINE" | sed 's|^|[PEARZ]   |'
-            echo "[PEARZ] With the cable in and the phone unlocked,"
-            echo "[PEARZ] this is usually the Mac keeping the device"
-            echo "[PEARZ] busy: quit Xcode and any Unity editor on the"
-            echo "[PEARZ] build Mac, or unplug and plug the cable once."
-            echo "[PEARZ] Set UMP_IOS_DEVICE_UDID to skip detection and"
-            echo "[PEARZ] let xcodebuild talk to the device directly."
+            echo "[PEARZ] devicectl did not list it either, so the"
+            echo "[PEARZ] device really is unreachable from here."
+            echo "[PEARZ] Unplug and plug the cable once, and set"
+            echo "[PEARZ] UMP_IOS_DEVICE_UDID to skip detection and let"
+            echo "[PEARZ] xcodebuild talk to the device directly."
 
         else
 
@@ -590,19 +660,21 @@ fi
 # ------------------------------------------------------------
 # Strip capabilities a test build cannot sign
 #
-# Off by default. The Unity build appends to the Xcode project
-# instead of replacing it, so Signing & Capabilities is whatever
-# was set up in Xcode on this Mac - deleting a capability here
-# would undo that on every build.
+# Appending keeps the signing setup made in Xcode, but it does
+# not keep a capability deleted there: com.unity.purchasing runs
+# a post-process build callback that writes In-App Purchase back
+# into the project on every single build, append or not. Nothing
+# in Unity turns that off, so it is undone here - after Unity has
+# written the project, before xcodebuild reads it.
 #
-# Set UMP_IOS_STRIP_CAPABILITIES=com.apple.InAppPurchase when the
-# team signing the build cannot carry a capability the project
-# asks for. A free Personal Team is never given In-App Purchase,
-# and provisioning then fails with "Personal development teams
-# ... do not support the In-App Purchase capability".
+# A free Personal Team is never issued a profile carrying In-App
+# Purchase, so leaving it in fails provisioning outright.
+#
+# UMP_IOS_STRIP_CAPABILITIES="" keeps every capability, which is
+# what a paid team wants.
 # ------------------------------------------------------------
 
-STRIP="${UMP_IOS_STRIP_CAPABILITIES:-}"
+STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
 
 PROJECT_DIR="$(dirname "$PROJECT")"
 
@@ -643,6 +715,8 @@ if [ -n "$STRIP" ]; then
 
     PBXPROJ="$PROJECT/project.pbxproj"
 
+    STRIPPED_BY_NAME=0
+
     for capability in $STRIP; do
 
         if grep -q "$capability" "$PBXPROJ" 2>/dev/null; then
@@ -652,29 +726,35 @@ if [ -n "$STRIP" ]; then
                 "$PBXPROJ"
 
             echo "[PEARZ] Removed capability: $capability"
+
+            STRIPPED_BY_NAME=1
         fi
     done
 
-    # Whatever else Unity put in TargetAttributes. The key is not
-    # always the name Apple documents - Unity quotes some of them
-    # and spells others its own way - so matching by name misses
-    # capabilities that still make provisioning ask for a profile
-    # this team cannot get. A test build needs none of them, so
-    # the whole block goes.
     SYSTEM_CAPABILITIES="$(perl -0ne \
         'print "$1\n" while /(SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?2))*\});)/g' \
         "$PBXPROJ" 2>/dev/null || true)"
 
     if [ -n "$SYSTEM_CAPABILITIES" ]; then
 
-        echo "[PEARZ] Capabilities declared in the Xcode project:"
+        echo "[PEARZ] Capabilities left in the Xcode project:"
         echo "$SYSTEM_CAPABILITIES" | sed 's|^|[PEARZ]   |'
 
-        perl -0pi -e \
-            's/^[ \t]*SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?1))*\});[ \t]*\n//mg' \
-            "$PBXPROJ"
+        # Removing by name is the precise way and leaves every
+        # other capability set up in Xcode alone. It only works
+        # when the key is spelled the way Apple documents it,
+        # which Unity does not always do - and a capability this
+        # team cannot sign still fails the whole build. So when
+        # no name matched, the block goes as a whole.
+        if [ "$STRIPPED_BY_NAME" -eq 0 ]; then
 
-        echo "[PEARZ] Removed the SystemCapabilities block."
+            perl -0pi -e \
+                's/^[ \t]*SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?1))*\});[ \t]*\n//mg' \
+                "$PBXPROJ"
+
+            echo "[PEARZ] No name in UMP_IOS_STRIP_CAPABILITIES matched,"
+            echo "[PEARZ] so the whole block above was removed."
+        fi
     fi
 
     # The matching entitlements, when Unity wrote any.
