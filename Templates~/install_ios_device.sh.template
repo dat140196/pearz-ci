@@ -20,11 +20,9 @@ set -euo pipefail
 #   UMP_KEYCHAIN_PASSWORD login password of the build user, to
 #                         unlock the keychain Xcode keeps its
 #                         account token in
-#   UMP_IOS_STRIP_CAPABILITIES
-#                         capabilities to delete from the project
-#                         before building, because the team cannot
-#                         sign them (In-App Purchase by default;
-#                         "" keeps every capability)
+#
+# Capabilities are handled by Jenkins/strip_ios_iap.sh, which
+# runs between the Unity build and this script.
 # ============================================================
 
 echo "========================================"
@@ -659,142 +657,9 @@ if [ "$USING_API_KEY" -eq 0 ] && \
     echo "[PEARZ] Building anyway - Xcode may still know better."
 fi
 
-# ------------------------------------------------------------
-# Strip capabilities a test build cannot sign
-#
-# Appending keeps the signing setup made in Xcode, but it does
-# not keep a capability deleted there: com.unity.purchasing runs
-# a post-process build callback that writes In-App Purchase back
-# into the project on every single build, append or not. Nothing
-# in Unity turns that off, so it is undone here - after Unity has
-# written the project, before xcodebuild reads it.
-#
-# A free Personal Team is never issued a profile carrying In-App
-# Purchase, so leaving it in fails provisioning outright.
-#
-# UMP_IOS_STRIP_CAPABILITIES="" keeps every capability, which is
-# what a paid team wants.
-# ------------------------------------------------------------
-
-STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
-
-PROJECT_DIR="$(dirname "$PROJECT")"
-
-# Every entitlements file this build could sign with: the one the
-# target points at (a path relative to the project) plus anything
-# Unity left in the exported project. Which of the two carries a
-# capability changed between Unity versions, so both are cleaned.
-list_entitlements() {
-
-    local declared
-    local file
-
-    declared="$(echo "$SETTINGS" \
-        | awk -F' = ' '/ CODE_SIGN_ENTITLEMENTS = / {print $2}' \
-        | tr -d '\r' || true)"
-
-    while IFS= read -r file; do
-
-        [ -n "$file" ] || continue
-
-        case "$file" in
-            /*) echo "$file" ;;
-            *)  echo "$PROJECT_DIR/$file" ;;
-        esac
-
-    done <<DECLARED
-$declared
-DECLARED
-
-    find "$PROJECT_DIR" \
-        -maxdepth 3 \
-        -type f \
-        -name "*.entitlements" \
-        2>/dev/null || true
-}
-
-if [ -n "$STRIP" ]; then
-
-    STRIPPED_BY_NAME=0
-
-    for capability in $STRIP; do
-
-        if grep -q "$capability" "$PBXPROJ" 2>/dev/null; then
-
-            perl -0pi -e \
-                "s/^[ \t]*\"?\Q$capability\E\"?[ \t]*=[ \t]*\{[^}]*\};[ \t]*\n//mg" \
-                "$PBXPROJ"
-
-            echo "[PEARZ] Removed capability: $capability"
-
-            STRIPPED_BY_NAME=1
-        fi
-    done
-
-    SYSTEM_CAPABILITIES="$(perl -0ne \
-        'print "$1\n" while /(SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?2))*\});)/g' \
-        "$PBXPROJ" 2>/dev/null || true)"
-
-    if [ -n "$SYSTEM_CAPABILITIES" ]; then
-
-        echo "[PEARZ] Capabilities left in the Xcode project:"
-        echo "$SYSTEM_CAPABILITIES" | sed 's|^|[PEARZ]   |'
-
-        # Removing by name is the precise way and leaves every
-        # other capability set up in Xcode alone. It only works
-        # when the key is spelled the way Apple documents it,
-        # which Unity does not always do - and a capability this
-        # team cannot sign still fails the whole build. So when
-        # no name matched, the block goes as a whole.
-        if [ "$STRIPPED_BY_NAME" -eq 0 ]; then
-
-            perl -0pi -e \
-                's/^[ \t]*SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?1))*\});[ \t]*\n//mg' \
-                "$PBXPROJ"
-
-            echo "[PEARZ] No name in UMP_IOS_STRIP_CAPABILITIES matched,"
-            echo "[PEARZ] so the whole block above was removed."
-        fi
-    fi
-
-    # The matching entitlements, when Unity wrote any.
-    ENTITLEMENTS_FOUND="$(list_entitlements | sort -u | grep -v '^$' || true)"
-
-    if [ -n "$ENTITLEMENTS_FOUND" ]; then
-
-        echo "[PEARZ] Entitlements files:"
-        echo "$ENTITLEMENTS_FOUND" | sed 's|^|[PEARZ]   |'
-
-    else
-
-        echo "[PEARZ] No entitlements file in the exported project."
-    fi
-
-    while IFS= read -r entitlements; do
-
-        [ -f "$entitlements" ] || continue
-
-        for key in \
-            com.apple.developer.in-app-payments \
-            com.apple.developer.storekit-external-purchase \
-            com.apple.developer.storekit-external-purchase-link \
-            aps-environment; do
-
-            /usr/libexec/PlistBuddy -c "Print :$key" "$entitlements" \
-                >/dev/null 2>&1 || continue
-
-            if /usr/libexec/PlistBuddy -c "Delete :$key" "$entitlements" \
-                >/dev/null 2>&1; then
-
-                echo "[PEARZ] Removed entitlement $key from $entitlements"
-            fi
-        done
-
-    done <<ENTITLEMENTS
-$ENTITLEMENTS_FOUND
-ENTITLEMENTS
-
-fi
+# Capabilities are stripped by Jenkins/strip_ios_iap.sh, which
+# runs after the Unity editor has exited and therefore after
+# every post-process build callback that could add one back.
 
 rm -rf "$DERIVED"
 
@@ -835,7 +700,7 @@ capability_refused() {
 # test build loses IAP, push and keychain sharing; the App Store
 # path (release/ios) never comes through here, so nothing that
 # ships is affected.
-if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
+if [ "$BUILD_OK" -eq 0 ] && capability_refused; then
 
     echo "========================================"
     echo "[PEARZ] This team cannot sign a capability the project asks"
@@ -873,29 +738,29 @@ if [ "$BUILD_OK" -eq 0 ]; then
         echo "[PEARZ] not issue one a development profile carrying"
         echo "[PEARZ] In-App Purchase."
         echo "[PEARZ]"
-        echo "[PEARZ] The exported project asks for no such capability -"
-        echo "[PEARZ] the block printed above is all it declares, and"
-        echo "[PEARZ] there is no entitlements file. So this comes from"
-        echo "[PEARZ] Apple's side: the App ID behind $BUNDLE_ID"
-        echo "[PEARZ] carries In-App Purchase, and every profile Xcode"
-        echo "[PEARZ] asks for has to match it. Nothing this script can"
-        echo "[PEARZ] delete from the project changes that."
+        echo "[PEARZ] Nothing in the project asks for it: no capability"
+        echo "[PEARZ] block, no entitlements file, and a bundle id whose"
+        echo "[PEARZ] App ID was created fresh fails the same way. Xcode"
+        echo "[PEARZ] reads the requirement off the app itself - the"
+        echo "[PEARZ] Unity IAP plugin links StoreKit, and automatic"
+        echo "[PEARZ] signing puts In-App Purchase on the App ID for any"
+        echo "[PEARZ] app that does. No edit to the exported project"
+        echo "[PEARZ] takes that back."
         echo "[PEARZ]"
-        echo "[PEARZ] Two ways out:"
+        echo "[PEARZ] Two ways out, both outside this script:"
         echo "[PEARZ]"
         echo "[PEARZ]  - An Apple Developer Program team. Sign that"
         echo "[PEARZ]    Apple ID in to Xcode -> Settings -> Accounts"
         echo "[PEARZ]    and set UMP_IOS_TEAM_ID to its team id. It"
         echo "[PEARZ]    signs In-App Purchase, so the device build"
-        echo "[PEARZ]    matches what ships."
+        echo "[PEARZ]    matches what ships. This is the only option"
+        echo "[PEARZ]    that keeps the build identical to the store."
         echo "[PEARZ]"
-        echo "[PEARZ]  - A bundle id no App ID exists for yet, e.g."
-        echo "[PEARZ]    $BUNDLE_ID.test, in Player Settings ->"
-        echo "[PEARZ]    iOS -> Identification, committed on this"
-        echo "[PEARZ]    branch only. A fresh App ID carries no"
-        echo "[PEARZ]    capability, so a Personal Team can sign it."
-        echo "[PEARZ]    Run once with UMP_IOS_CLEAN=1 afterwards so"
-        echo "[PEARZ]    the Xcode project is exported from scratch."
+        echo "[PEARZ]  - A build with no Unity IAP in it: drop"
+        echo "[PEARZ]    com.unity.purchasing from Packages/manifest.json"
+        echo "[PEARZ]    on this branch and guard the code that calls it."
+        echo "[PEARZ]    Without StoreKit there is no capability to sign,"
+        echo "[PEARZ]    and purchases cannot be tested on the device."
         echo "[PEARZ]"
     fi
 

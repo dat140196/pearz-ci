@@ -305,12 +305,19 @@ pipeline {
 
                     def run = {
 
+                        // The strip runs between the two on purpose:
+                        // Unity packages add capabilities from post-
+                        // process callbacks, and only once the editor
+                        // has exited is the project final.
                         sh '''
                             chmod +x Jenkins/find_unity.sh
                             chmod +x Jenkins/build_ios.sh
+                            chmod +x Jenkins/strip_ios_iap.sh
                             chmod +x Jenkins/install_ios_device.sh
 
                             ./Jenkins/build_ios.sh
+
+                            ./Jenkins/strip_ios_iap.sh
 
                             ./Jenkins/install_ios_device.sh
                         '''
