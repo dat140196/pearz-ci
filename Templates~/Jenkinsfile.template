@@ -272,15 +272,59 @@ pipeline {
             }
 
             steps {
-                sh '''
-                    chmod +x Jenkins/find_unity.sh
-                    chmod +x Jenkins/build_ios.sh
-                    chmod +x Jenkins/install_ios_device.sh
 
-                    ./Jenkins/build_ios.sh
+                // Optional: the build user's login password, so the
+                // script can unlock the keychain Xcode keeps its
+                // Apple ID token in. Without it xcodebuild reports
+                // "No Accounts" from a Jenkins session.
+                script {
 
-                    ./Jenkins/install_ios_device.sh
-                '''
+                    def binding = [
+                        string(
+                            credentialsId: 'UMP_KEYCHAIN_PASSWORD',
+                            variable: 'UMP_KEYCHAIN_PASSWORD'
+                        )
+                    ]
+
+                    // Whether the credential exists at all. Probing
+                    // it on its own keeps a real build failure from
+                    // being mistaken for a missing credential.
+                    def hasKeychain = true
+
+                    try {
+
+                        withCredentials(binding) { }
+
+                    } catch (ignored) {
+
+                        hasKeychain = false
+
+                        echo '[PEARZ] No UMP_KEYCHAIN_PASSWORD credential - ' +
+                             'add one if xcodebuild reports "No Accounts".'
+                    }
+
+                    def run = {
+
+                        sh '''
+                            chmod +x Jenkins/find_unity.sh
+                            chmod +x Jenkins/build_ios.sh
+                            chmod +x Jenkins/install_ios_device.sh
+
+                            ./Jenkins/build_ios.sh
+
+                            ./Jenkins/install_ios_device.sh
+                        '''
+                    }
+
+                    if (hasKeychain) {
+
+                        withCredentials(binding) { run() }
+
+                    } else {
+
+                        run()
+                    }
+                }
             }
         }
 

@@ -13,6 +13,9 @@ set -euo pipefail
 #   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
 #   UMP_IOS_CONFIGURATION Release (default) or Debug
 #   UMP_IOS_LAUNCH=0      install only, do not start the app
+#   UMP_KEYCHAIN_PASSWORD login password of the build user, to
+#                         unlock the keychain Xcode keeps its
+#                         account token in
 # ============================================================
 
 echo "========================================"
@@ -26,6 +29,24 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 CONFIGURATION="${UMP_IOS_CONFIGURATION:-Release}"
+
+# Jenkins runs outside the GUI session the Apple ID was signed in
+# from, and there the login keychain is locked - the Xcode account
+# token inside it is then invisible and xcodebuild reports "No
+# Accounts" however many accounts Xcode shows on screen.
+if [ -n "${UMP_KEYCHAIN_PASSWORD:-}" ]; then
+
+    if security unlock-keychain -p "$UMP_KEYCHAIN_PASSWORD" \
+        "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null; then
+
+        echo "[PEARZ] Login keychain unlocked."
+
+    else
+
+        echo "[PEARZ] WARNING: could not unlock the login keychain."
+        echo "[PEARZ] Check UMP_KEYCHAIN_PASSWORD."
+    fi
+fi
 
 # Unity exports to Builds/iOS/<Game name>, so look the project up
 # instead of assuming a fixed path.
@@ -551,12 +572,34 @@ if [ -n "$STRIP" ]; then
         if grep -q "$capability" "$PBXPROJ" 2>/dev/null; then
 
             perl -0pi -e \
-                "s/^[ \t]*\Q$capability\E[ \t]*=[ \t]*\{[^}]*\};[ \t]*\n//mg" \
+                "s/^[ \t]*\"?\Q$capability\E\"?[ \t]*=[ \t]*\{[^}]*\};[ \t]*\n//mg" \
                 "$PBXPROJ"
 
             echo "[PEARZ] Removed capability: $capability"
         fi
     done
+
+    # Whatever else Unity put in TargetAttributes. The key is not
+    # always the name Apple documents - Unity quotes some of them
+    # and spells others its own way - so matching by name misses
+    # capabilities that still make provisioning ask for a profile
+    # this team cannot get. A test build needs none of them, so
+    # the whole block goes.
+    SYSTEM_CAPABILITIES="$(perl -0ne \
+        'print "$1\n" while /(SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?2))*\});)/g' \
+        "$PBXPROJ" 2>/dev/null || true)"
+
+    if [ -n "$SYSTEM_CAPABILITIES" ]; then
+
+        echo "[PEARZ] Capabilities declared in the Xcode project:"
+        echo "$SYSTEM_CAPABILITIES" | sed 's|^|[PEARZ]   |'
+
+        perl -0pi -e \
+            's/^[ \t]*SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?1))*\});[ \t]*\n//mg' \
+            "$PBXPROJ"
+
+        echo "[PEARZ] Removed the SystemCapabilities block."
+    fi
 
     # The matching entitlements, when Unity wrote any.
     ENTITLEMENTS_FOUND="$(list_entitlements | sort -u | grep -v '^$' || true)"
@@ -595,32 +638,28 @@ if [ -n "$STRIP" ]; then
 $ENTITLEMENTS_FOUND
 ENTITLEMENTS
 
-    # What the project asks for after the cleanup. When a build
-    # still fails on a capability while this prints nothing, the
-    # capability is attached to the App ID Apple holds for the
-    # bundle id, not to anything Unity exported.
-    CAPABILITIES_LEFT="$(grep -nE \
-        "SystemCapabilities|com\.apple\.[A-Za-z]+ = \{" \
-        "$PBXPROJ" 2>/dev/null || true)"
-
-    if [ -n "$CAPABILITIES_LEFT" ]; then
-
-        echo "[PEARZ] Capabilities still declared in the project:"
-        echo "$CAPABILITIES_LEFT" | sed 's|^|[PEARZ]   |'
-
-    else
-
-        echo "[PEARZ] No capability declared in the Xcode project."
-    fi
 fi
 
 rm -rf "$DERIVED"
 
 BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodebuild-XXXXXX")"
 
+# Each attempt overwrites BUILD_LOG, so the reason the first one
+# failed is gone by the time the diagnostics run. Keeping the
+# error lines of every attempt is what lets them report on all of
+# them - "No Accounts" only ever shows up in the first.
+ERROR_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodeerrors-XXXXXX")"
+
+record_errors() {
+
+    grep -E "error:|No Accounts" "$BUILD_LOG" >> "$ERROR_LOG" 2>/dev/null || true
+}
+
 BUILD_OK=1
 
 xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+
+record_errors
 
 capability_refused() {
 
@@ -654,89 +693,36 @@ if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
     xcodebuild "${BUILD_ARGS[@]}" \
         CODE_SIGN_ENTITLEMENTS="" \
         build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
+
+    record_errors
 fi
 
-# ------------------------------------------------------------
-# Retry with manual signing
-#
-# "Provisioning profile ... doesn't include the In-App Purchase
-# capability" means the profile for this bundle id already exists
-# on the Mac and is usable - what fails is automatic signing
-# asking Apple for a *new* one that carries In-App Purchase, which
-# a Personal Team is never given.
-#
-# Manual signing skips that round trip: xcodebuild signs with the
-# profile already downloaded and never contacts the portal, so
-# nothing asks for the capability. With the entitlements dropped
-# the app has no IAP, which is what a device test build wants
-# anyway. The bundle id stays exactly what Player Settings says.
-# ------------------------------------------------------------
-
-if [ "$BUILD_OK" -eq 0 ] && [ -n "$STRIP" ] && capability_refused; then
-
-    PROFILE_NAME="$(find_profile_for "$BUNDLE_ID" || true)"
-
-    if [ -n "$PROFILE_NAME" ]; then
-
-        echo "========================================"
-        echo "[PEARZ] Automatic signing keeps asking Apple for a profile"
-        echo "[PEARZ] with In-App Purchase. Retrying with manual signing"
-        echo "[PEARZ] on the profile already on this Mac."
-        echo "[PEARZ] Profile      : $PROFILE_NAME"
-        echo "========================================"
-
-        rm -rf "$DERIVED"
-
-        BUILD_OK=1
-
-        # -allowProvisioningUpdates is what pulls in the portal, so
-        # the manual build is assembled without it.
-        MANUAL_ARGS=()
-
-        for arg in "${BUILD_ARGS[@]}"; do
-
-            case "$arg" in
-                -allowProvisioningUpdates|CODE_SIGN_STYLE=*) continue ;;
-            esac
-
-            MANUAL_ARGS+=("$arg")
-        done
-
-        xcodebuild "${MANUAL_ARGS[@]}" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Development" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
-
-    else
-
-        echo "[PEARZ] No provisioning profile for $BUNDLE_ID on this Mac,"
-        echo "[PEARZ] so manual signing has nothing to sign with."
-    fi
-fi
 
 if [ "$BUILD_OK" -eq 0 ]; then
 
     echo "[PEARZ] ERROR: xcodebuild failed."
 
     if grep -qE "No Accounts|No profiles for|requires a development team" \
-        "$BUILD_LOG"; then
+        "$ERROR_LOG"; then
 
         signing_help
     fi
 
     if grep -qE "do not support the|does not support the|doesn't include the .*capability" \
-        "$BUILD_LOG"; then
+        "$ERROR_LOG"; then
 
         echo "[PEARZ]"
         echo "[PEARZ] --- capability not signable by this team ---"
         echo "[PEARZ] Team $TEAM is a free Personal Team. Apple does not"
         echo "[PEARZ] issue development profiles with In-App Purchase for"
-        echo "[PEARZ] one. Stripping the capability, dropping the"
-        echo "[PEARZ] entitlements and signing manually with the profile"
-        echo "[PEARZ] already here all failed, so this Mac cannot sign"
-        echo "[PEARZ] the app at all."
+        echo "[PEARZ] one, and the capability survived both the project"
+        echo "[PEARZ] cleanup and the build without entitlements."
+        echo "[PEARZ]"
+        echo "[PEARZ] The profile named above is the one Xcode already"
+        echo "[PEARZ] holds for this bundle id. It cannot be reused by"
+        echo "[PEARZ] hand - Xcode-managed profiles are refused under"
+        echo "[PEARZ] manual signing - so the capability has to be gone"
+        echo "[PEARZ] before xcodebuild starts."
         echo "[PEARZ]"
         echo "[PEARZ] The fix is an Apple Developer Program team:"
         echo "[PEARZ] sign that Apple ID in to Xcode -> Settings ->"
@@ -744,20 +730,17 @@ if [ "$BUILD_OK" -eq 0 ]; then
         echo "[PEARZ] A paid team signs In-App Purchase, so no stripping"
         echo "[PEARZ] happens and the device build matches the store one."
         echo "[PEARZ]"
-        echo "[PEARZ] Without one:"
-        echo "[PEARZ]  - turn Unity IAP off in the build used by"
-        echo "[PEARZ]    release/ios-test, or"
-        echo "[PEARZ]  - add the capability the log names above to"
-        echo "[PEARZ]    UMP_IOS_STRIP_CAPABILITIES."
+        echo "[PEARZ] Without one, turn Unity IAP off in the build used"
+        echo "[PEARZ] by release/ios-test."
         echo "[PEARZ]"
     fi
 
-    rm -f "$BUILD_LOG"
+    rm -f "$BUILD_LOG" "$ERROR_LOG"
 
     exit 1
 fi
 
-rm -f "$BUILD_LOG"
+rm -f "$BUILD_LOG" "$ERROR_LOG"
 
 # ------------------------------------------------------------
 # Locate the .app
