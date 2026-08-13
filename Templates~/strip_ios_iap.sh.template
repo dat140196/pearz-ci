@@ -1,44 +1,25 @@
 #!/bin/bash
-
 set -euo pipefail
 
 # ============================================================
-# PEARZ iOS - remove In-App Purchase from the Xcode project
-# Unity just exported, and prove it is gone.
+# PEARZ iOS device build - remove local IAP capability metadata
+# and isolate the Personal Team test build from the production
+# App ID by using a dedicated bundle id.
 #
-# Runs between the Unity build and xcodebuild, on purpose. Unity
-# packages add capabilities from post-process build callbacks -
-# com.unity.purchasing calls ProjectCapabilityManager.
-# AddInAppPurchase() - and callback order is not something a
-# build can rely on. Once the Unity process has exited, nothing
-# else writes to the project, so a strip here is the last word.
+# Runs AFTER Unity export and BEFORE xcodebuild.
 #
-# Signing is never touched: DEVELOPMENT_TEAM, provisioning and
-# the bundle id set up in Xcode on this Mac are read before and
-# after, and a change in any of them fails the step.
+# Default on release/ios-test:
+#   com.company.game -> com.company.game.device
 #
-# Only for the device test build on release/ios-test. A paid team
-# signs In-App Purchase, so nothing needs removing there and the
-# build stays identical to the one that ships - the step gets out
-# of the way on its own when it sees one.
-#
-# Optional Jenkins env vars:
-#   UMP_IOS_PROJECT       path to the .xcodeproj, when the guess
-#                         below is wrong
-#   UMP_IOS_STRIP_CAPABILITIES
-#                         capabilities to remove
-#                         (com.apple.InAppPurchase by default)
-#   UMP_IOS_PAID_TEAM=1   skip; 0 strips even so. Read from the
-#                         provisioning profiles when unset.
-#   UMP_IOS_STRIP_BRANCH  branch this may run on
-#                         (release/ios-test; "" allows any)
-#   UMP_IOS_STRIP_STRICT=0
-#                         warn instead of failing when something
-#                         survives the strip
+# Overrides:
+#   UMP_IOS_PROJECT=/path/to/Unity-iPhone.xcodeproj
+#   UMP_IOS_DEVICE_BUNDLE_ID=com.company.game.mydevice
+#   UMP_IOS_KEEP_BUNDLE_ID=1      # do not change bundle id
+#   UMP_IOS_STRIP_BRANCH=""       # allow any branch
 # ============================================================
 
 echo "========================================"
-echo "[PEARZ] iOS strip capabilities"
+echo "[PEARZ] iOS device project fix"
 echo "[PEARZ] UMP @UMP_VERSION@"
 echo "========================================"
 
@@ -47,34 +28,16 @@ if [ -z "${WORKSPACE:-}" ]; then
     exit 1
 fi
 
-STRIP="${UMP_IOS_STRIP_CAPABILITIES-com.apple.InAppPurchase}"
-
-if [ -z "$STRIP" ]; then
-    echo "[PEARZ] UMP_IOS_STRIP_CAPABILITIES is empty - nothing to do."
-    exit 0
-fi
-
-# The pipeline only calls this from the iOS Device stage, and the
-# check is repeated here so a hand-run on another branch cannot
-# quietly take a capability out of a build meant for the store.
 STRIP_BRANCH="${UMP_IOS_STRIP_BRANCH-release/ios-test}"
-
 if [ -n "$STRIP_BRANCH" ] && [ -n "${BRANCH_NAME:-}" ] && \
    [ "$BRANCH_NAME" != "$STRIP_BRANCH" ]; then
-
-    echo "[PEARZ] Branch ${BRANCH_NAME} is not $STRIP_BRANCH -"
-    echo "[PEARZ] leaving the project alone."
+    echo "[PEARZ] Branch ${BRANCH_NAME} is not $STRIP_BRANCH."
+    echo "[PEARZ] Project left unchanged."
     exit 0
 fi
 
-# ------------------------------------------------------------
-# Project
-# ------------------------------------------------------------
-
 PROJECT="${UMP_IOS_PROJECT:-}"
-
 if [ -z "$PROJECT" ]; then
-
     PROJECT="$(find "$WORKSPACE/Builds/iOS" \
         -maxdepth 2 \
         -type d \
@@ -83,344 +46,183 @@ if [ -z "$PROJECT" ]; then
 fi
 
 if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
-    echo "[PEARZ] ERROR: no Xcode project under"
-    echo "$WORKSPACE/Builds/iOS"
-    echo "[PEARZ] Run the Unity iOS build first."
+    echo "[PEARZ] ERROR: no Xcode project found under $WORKSPACE/Builds/iOS"
     exit 1
 fi
 
 PBXPROJ="$PROJECT/project.pbxproj"
-PROJECT_DIR="$(dirname "$PROJECT")"
-
 if [ ! -f "$PBXPROJ" ]; then
-    echo "[PEARZ] ERROR: $PBXPROJ is missing."
+    echo "[PEARZ] ERROR: missing $PBXPROJ"
     exit 1
 fi
 
-echo "[PEARZ] Project      : $PROJECT"
-echo "[PEARZ] Stripping    : $STRIP"
+SCHEME="${IOS_SCHEME:-Unity-iPhone}"
+CONFIGURATION="${UMP_IOS_CONFIGURATION:-Release}"
+BACKUP="$(mktemp "${TMPDIR:-/tmp}/ump-pbxproj-XXXXXX")"
+cp "$PBXPROJ" "$BACKUP"
 
-# ------------------------------------------------------------
-# Signing, before
-#
-# Read straight out of the project file rather than through
-# xcodebuild: this has to stay readable even when the project
-# cannot be built, which is the situation being fixed.
-# ------------------------------------------------------------
+restore_on_error() {
+    local code=$?
+    if [ "$code" -ne 0 ]; then
+        echo "[PEARZ] ERROR: restoring project.pbxproj after failed edit."
+        cp "$BACKUP" "$PBXPROJ" 2>/dev/null || true
+    fi
+    rm -f "$BACKUP"
+    exit "$code"
+}
+trap restore_on_error EXIT
 
 signing_state() {
-
-    grep -hoE '(DEVELOPMENT_TEAM|DevelopmentTeam|PROVISIONING_PROFILE_SPECIFIER|ProvisioningStyle|PRODUCT_BUNDLE_IDENTIFIER)[ \t]*=[ \t]*[^;]*;' \
+    grep -hoE '(DEVELOPMENT_TEAM|DevelopmentTeam|PROVISIONING_PROFILE_SPECIFIER|ProvisioningStyle)[ \t]*=[ \t]*[^;]*;' \
         "$PBXPROJ" 2>/dev/null | sort -u || true
 }
 
 SIGNING_BEFORE="$(signing_state)"
 
+echo "[PEARZ] Project       : $PROJECT"
+echo "[PEARZ] Scheme        : $SCHEME"
+echo "[PEARZ] Configuration : $CONFIGURATION"
+
 if [ -n "$SIGNING_BEFORE" ]; then
-
-    echo "[PEARZ] Signing in the project:"
-    echo "$SIGNING_BEFORE" | sed 's|^|[PEARZ]   |'
-
-else
-
-    echo "[PEARZ] WARNING: no signing settings found in the project."
+    echo "[PEARZ] Signing before:"
+    echo "$SIGNING_BEFORE" | sed 's/^/[PEARZ]   /'
 fi
 
 # ------------------------------------------------------------
-# Paid team?
-#
-# Apple issues a free Personal Team development profiles that
-# last a week, and an Apple Developer Program team ones that last
-# a year. The profiles on this Mac are the only place that shows
-# up, and the gap between the two is far too wide to confuse.
-#
-# A paid team signs In-App Purchase, so removing it would only
-# make the device build differ from the one that ships.
+# 1) Remove the local Xcode capability marker if Unity or a
+# package wrote it. This mirrors the project-file part of pressing
+# '-' on In-App Purchase in Signing & Capabilities.
 # ------------------------------------------------------------
+IAP_BEFORE="$(grep -nE 'com\.apple\.InAppPurchase|In-App Purchase' "$PBXPROJ" 2>/dev/null || true)"
 
-TEAM="$(grep -hoE '(DEVELOPMENT_TEAM|DevelopmentTeam)[ \t]*=[ \t]*"?[A-Z0-9]{10}' \
-    "$PBXPROJ" 2>/dev/null | grep -oE '[A-Z0-9]{10}$' | sort -u | head -n 1 || true)"
-
-# Days a profile of this team stays valid, the longest one found.
-team_profile_days() {
-
-    local team="$1"
-    local dir
-    local profile
-    local plist
-    local owner
-    local created
-    local expires
-    local days
-    local best=0
-
-    [ -n "$team" ] || return 0
-
-    for dir in \
-        "$HOME/Library/MobileDevice/Provisioning Profiles" \
-        "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
-
-        [ -d "$dir" ] || continue
-
-        for profile in "$dir"/*.mobileprovision; do
-
-            [ -f "$profile" ] || continue
-
-            plist="$(security cms -D -i "$profile" 2>/dev/null || true)"
-
-            [ -n "$plist" ] || continue
-
-            owner="$(echo "$plist" \
-                | plutil -extract TeamIdentifier.0 raw - 2>/dev/null || true)"
-
-            [ "$owner" = "$team" ] || continue
-
-            created="$(echo "$plist" \
-                | plutil -extract CreationDate raw - 2>/dev/null || true)"
-
-            expires="$(echo "$plist" \
-                | plutil -extract ExpirationDate raw - 2>/dev/null || true)"
-
-            created="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s \
-                2>/dev/null || true)"
-
-            expires="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$expires" +%s \
-                2>/dev/null || true)"
-
-            [ -n "$created" ] && [ -n "$expires" ] || continue
-
-            days=$(( (expires - created) / 86400 ))
-
-            [ "$days" -gt "$best" ] && best="$days"
-        done
-    done
-
-    echo "$best"
-}
-
-PAID="${UMP_IOS_PAID_TEAM:-}"
-
-if [ -z "$PAID" ]; then
-
-    PROFILE_DAYS="$(team_profile_days "$TEAM")"
-
-    if [ "${PROFILE_DAYS:-0}" -gt 30 ]; then
-
-        echo "[PEARZ] Team $TEAM has profiles valid ${PROFILE_DAYS} days,"
-        echo "[PEARZ] which only a paid team is given."
-
-        PAID=1
-
-    elif [ "${PROFILE_DAYS:-0}" -gt 0 ]; then
-
-        echo "[PEARZ] Team $TEAM has profiles valid ${PROFILE_DAYS} days -"
-        echo "[PEARZ] a free Personal Team."
-
-        PAID=0
-
-    else
-
-        echo "[PEARZ] No profile of team ${TEAM:-<unknown>} to judge by,"
-        echo "[PEARZ] so this is treated as a free Personal Team."
-
-        PAID=0
-    fi
+if [ -n "$IAP_BEFORE" ]; then
+    echo "[PEARZ] Local IAP metadata before:"
+    echo "$IAP_BEFORE" | sed 's/^/[PEARZ]   /'
 fi
 
-if [ "$PAID" = "1" ]; then
+perl -0pi -e '
+    s/^[ \t]*"?com\.apple\.InAppPurchase"?[ \t]*=[ \t]*\{[^{}]*\};[ \t]*\r?\n//mg;
+    s/^[ \t]*SystemCapabilities[ \t]*=[ \t]*\{[ \t\r\n]*\};[ \t]*\r?\n//mg;
+' "$PBXPROJ"
 
-    echo "[PEARZ] Paid team - In-App Purchase is signable, so the"
-    echo "[PEARZ] project is left exactly as Unity wrote it."
-    echo "========================================"
-    exit 0
-fi
-
-# ------------------------------------------------------------
-# Entitlements
-#
-# Searched by hand rather than through xcodebuild, and deeper
-# than the project root, because Unity has moved this file
-# between versions.
-# ------------------------------------------------------------
-
-ENTITLEMENTS_FOUND="$(find "$PROJECT_DIR" \
-    -maxdepth 4 \
-    -type f \
-    -name "*.entitlements" \
-    2>/dev/null | sort -u || true)"
-
-# ------------------------------------------------------------
-# Strip
-# ------------------------------------------------------------
-
-REMOVED=0
-
-for capability in $STRIP; do
-
-    grep -q "$capability" "$PBXPROJ" 2>/dev/null || continue
-
-    BEFORE="$(shasum "$PBXPROJ" | cut -d' ' -f1)"
-
-    # The key is quoted in some Unity versions and bare in
-    # others, and the entry it opens holds "enabled = 1;".
-    perl -0pi -e \
-        "s/^[ \t]*\"?\Q$capability\E\"?[ \t]*=[ \t]*\{[^{}]*\};[ \t]*\n//mg" \
-        "$PBXPROJ"
-
-    # The name can also turn up somewhere the pattern above does
-    # not reach, and saying it was removed then would be a lie
-    # the verification below has to catch.
-    if [ "$BEFORE" = "$(shasum "$PBXPROJ" | cut -d' ' -f1)" ]; then
-
-        echo "[PEARZ] $capability is in the project but not as a"
-        echo "[PEARZ] capability entry - left alone."
-
-        continue
-    fi
-
-    echo "[PEARZ] Removed $capability from the project."
-
-    REMOVED=$((REMOVED + 1))
-done
-
-# An empty SystemCapabilities block left behind is harmless, but
-# Xcode rewrites it on open and it reads as leftovers, so it goes.
-if perl -0ne 'exit(/SystemCapabilities\s*=\s*\{\s*\};/ ? 0 : 1)' \
-    "$PBXPROJ" 2>/dev/null; then
-
-    perl -0pi -e \
-        's/^[ \t]*SystemCapabilities\s*=\s*\{\s*\};[ \t]*\n//mg' \
-        "$PBXPROJ"
-
-    echo "[PEARZ] Removed the now empty SystemCapabilities block."
-fi
-
-# StoreKit and Apple Pay write their own entitlement keys, which
-# provisioning reads the same way it reads a capability.
-while IFS= read -r entitlements; do
-
-    [ -f "$entitlements" ] || continue
-
-    for key in \
-        com.apple.developer.in-app-payments \
-        com.apple.developer.storekit-external-purchase \
-        com.apple.developer.storekit-external-purchase-link; do
-
-        /usr/libexec/PlistBuddy -c "Print :$key" "$entitlements" \
-            >/dev/null 2>&1 || continue
-
-        if /usr/libexec/PlistBuddy -c "Delete :$key" "$entitlements" \
-            >/dev/null 2>&1; then
-
-            echo "[PEARZ] Removed $key from $entitlements"
-
-            REMOVED=$((REMOVED + 1))
-        fi
-    done
-
-done <<ENTITLEMENTS
-$ENTITLEMENTS_FOUND
-ENTITLEMENTS
-
-if [ "$REMOVED" -eq 0 ]; then
-    echo "[PEARZ] Nothing to remove - the project never had it."
-fi
-
-# ------------------------------------------------------------
-# Verify the capability is gone
-# ------------------------------------------------------------
-
-LEFTOVERS=""
-
-for capability in $STRIP; do
-
-    HITS="$(grep -n "$capability" "$PBXPROJ" 2>/dev/null || true)"
-
-    if [ -n "$HITS" ]; then
-        LEFTOVERS="$LEFTOVERS
-$PBXPROJ:
-$HITS"
-    fi
-done
-
-while IFS= read -r entitlements; do
-
-    [ -f "$entitlements" ] || continue
-
-    HITS="$(grep -nE "in-app-payments|storekit-external-purchase|InAppPurchase" \
-        "$entitlements" 2>/dev/null || true)"
-
-    if [ -n "$HITS" ]; then
-        LEFTOVERS="$LEFTOVERS
-$entitlements:
-$HITS"
-    fi
-
-done <<ENTITLEMENTS
-$ENTITLEMENTS_FOUND
-ENTITLEMENTS
-
-LEFTOVERS="$(echo "$LEFTOVERS" | grep -v '^$' || true)"
-
-if [ -n "$LEFTOVERS" ]; then
-
-    echo "[PEARZ] ERROR: the capability is still in the project:"
-    echo "$LEFTOVERS" | sed 's|^|[PEARZ]   |'
-
-    if [ "${UMP_IOS_STRIP_STRICT:-1}" = "1" ]; then
-        exit 1
-    fi
-
-else
-
-    echo "[PEARZ] Verified: no capability in $STRIP is left."
-fi
-
-# What the project still declares, so a build that fails on a
-# capability anyway can be read against this.
-SYSTEM_CAPABILITIES="$(perl -0ne \
-    'print "$1\n" while /(SystemCapabilities\s*=\s*(\{(?:[^{}]++|(?2))*\});)/g' \
-    "$PBXPROJ" 2>/dev/null || true)"
-
-if [ -n "$SYSTEM_CAPABILITIES" ]; then
-
-    echo "[PEARZ] Capabilities the project still declares:"
-    echo "$SYSTEM_CAPABILITIES" | sed 's|^|[PEARZ]   |'
-
-else
-
-    echo "[PEARZ] The project declares no capability at all."
-fi
-
-if [ -n "$ENTITLEMENTS_FOUND" ]; then
-
-    echo "[PEARZ] Entitlements files:"
-    echo "$ENTITLEMENTS_FOUND" | sed 's|^|[PEARZ]   |'
-
-else
-
-    echo "[PEARZ] No entitlements file in the exported project."
-fi
-
-# ------------------------------------------------------------
-# Verify signing came through untouched
-# ------------------------------------------------------------
-
-SIGNING_AFTER="$(signing_state)"
-
-if [ "$SIGNING_BEFORE" != "$SIGNING_AFTER" ]; then
-
-    echo "[PEARZ] ERROR: the strip changed signing settings."
-    echo "[PEARZ] Before:"
-    echo "$SIGNING_BEFORE" | sed 's|^|[PEARZ]   |'
-    echo "[PEARZ] After:"
-    echo "$SIGNING_AFTER" | sed 's|^|[PEARZ]   |'
-
+IAP_AFTER="$(grep -nE 'com\.apple\.InAppPurchase' "$PBXPROJ" 2>/dev/null || true)"
+if [ -n "$IAP_AFTER" ]; then
+    echo "[PEARZ] ERROR: com.apple.InAppPurchase is still present:"
+    echo "$IAP_AFTER" | sed 's/^/[PEARZ]   /'
     exit 1
 fi
 
-echo "[PEARZ] Verified: signing settings unchanged."
+echo "[PEARZ] Local IAP capability marker: absent."
 
+# ------------------------------------------------------------
+# 2) Resolve the app target bundle id.
+# ------------------------------------------------------------
+SETTINGS="$(xcodebuild -showBuildSettings \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    2>/dev/null || true)"
+
+BUNDLE_ID="$(echo "$SETTINGS" \
+    | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
+    | tr -d ' \r' || true)"
+
+if [ -z "$BUNDLE_ID" ]; then
+    BUNDLE_ID="$(grep -hoE 'PRODUCT_BUNDLE_IDENTIFIER[ \t]*=[ \t]*"?[A-Za-z0-9._-]+"?;' \
+        "$PBXPROJ" 2>/dev/null \
+        | sed -E 's/.*=[ \t]*"?([^";]+)"?;.*/\1/' \
+        | grep -v '^com\.unity3d\.' \
+        | head -n 1 || true)"
+fi
+
+if [ -z "$BUNDLE_ID" ]; then
+    echo "[PEARZ] ERROR: cannot determine app bundle id."
+    exit 1
+fi
+
+echo "[PEARZ] Original bundle id: $BUNDLE_ID"
+
+# ------------------------------------------------------------
+# 3) Personal Team isolation.
+#
+# The production App ID can keep In-App Purchase enabled on
+# Apple's signing side even when the exported pbxproj has no IAP
+# marker. release/ios-test therefore gets its own stable App ID.
+# This does not touch PlayerSettings or the release/ios workspace.
+# ------------------------------------------------------------
+DEVICE_BUNDLE_ID="$BUNDLE_ID"
+
+if [ "${UMP_IOS_KEEP_BUNDLE_ID:-0}" != "1" ]; then
+    if [ -n "${UMP_IOS_DEVICE_BUNDLE_ID:-}" ]; then
+        DEVICE_BUNDLE_ID="$UMP_IOS_DEVICE_BUNDLE_ID"
+    else
+        case "$BUNDLE_ID" in
+            *.device) DEVICE_BUNDLE_ID="$BUNDLE_ID" ;;
+            *) DEVICE_BUNDLE_ID="${BUNDLE_ID}.device" ;;
+        esac
+    fi
+fi
+
+if [ "$DEVICE_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+    echo "[PEARZ] Device bundle id  : $DEVICE_BUNDLE_ID"
+
+    OLD_BUNDLE_ID="$BUNDLE_ID" \
+    NEW_BUNDLE_ID="$DEVICE_BUNDLE_ID" \
+    perl -pi -e '
+        if (/PRODUCT_BUNDLE_IDENTIFIER\s*=/ && index($_, $ENV{"OLD_BUNDLE_ID"}) >= 0) {
+            s/\Q$ENV{"OLD_BUNDLE_ID"}\E/$ENV{"NEW_BUNDLE_ID"}/g;
+        }
+    ' "$PBXPROJ"
+else
+    echo "[PEARZ] Device bundle id  : unchanged"
+fi
+
+# Xcode must still be able to parse the project after our edits.
+if ! xcodebuild -list -project "$PROJECT" >/dev/null 2>&1; then
+    echo "[PEARZ] ERROR: Xcode cannot parse the edited project."
+    exit 1
+fi
+
+SETTINGS_AFTER="$(xcodebuild -showBuildSettings \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    2>/dev/null || true)"
+
+BUNDLE_AFTER="$(echo "$SETTINGS_AFTER" \
+    | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
+    | tr -d ' \r' || true)"
+
+if [ "$BUNDLE_AFTER" != "$DEVICE_BUNDLE_ID" ]; then
+    echo "[PEARZ] ERROR: bundle id patch did not take effect."
+    echo "[PEARZ] Expected: $DEVICE_BUNDLE_ID"
+    echo "[PEARZ] Actual  : ${BUNDLE_AFTER:-<empty>}"
+    exit 1
+fi
+
+SIGNING_AFTER="$(signing_state)"
+if [ "$SIGNING_BEFORE" != "$SIGNING_AFTER" ]; then
+    echo "[PEARZ] ERROR: signing settings changed unexpectedly."
+    echo "[PEARZ] Before:"
+    echo "$SIGNING_BEFORE" | sed 's/^/[PEARZ]   /'
+    echo "[PEARZ] After:"
+    echo "$SIGNING_AFTER" | sed 's/^/[PEARZ]   /'
+    exit 1
+fi
+
+# Diagnostic only. StoreKit may remain linked because the game
+# still contains Unity IAP code; that is not the Xcode capability
+# marker this script removes.
+echo "[PEARZ] Remaining StoreKit references (diagnostic):"
+grep -nEi 'StoreKit|InAppPurchase|In-App Purchase' "$PBXPROJ" \
+    | head -n 30 \
+    | sed 's/^/[PEARZ]   /' || true
+
+echo "[PEARZ] Verified bundle id : $BUNDLE_AFTER"
+echo "[PEARZ] Verified signing   : unchanged"
 echo "========================================"
-echo "[PEARZ] iOS strip finished"
+echo "[PEARZ] iOS device project fix finished"
 echo "========================================"
+
+trap - EXIT
+rm -f "$BACKUP"

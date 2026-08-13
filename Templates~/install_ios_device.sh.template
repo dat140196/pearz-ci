@@ -1,28 +1,26 @@
 #!/bin/bash
-
 set -euo pipefail
 
 # ============================================================
-# PEARZ iOS - compile the Xcode project Unity generated and
-# install it on a device plugged into the Jenkins Mac.
-# Used by release/ios-test.
+# PEARZ iOS - build the Unity generated Xcode project, sign it
+# with the configured team, install on a connected iPhone, and
+# optionally launch it.
 #
-# Optional Jenkins env vars:
-#   UMP_IOS_DEVICE_UDID   pick one device when several are
-#                         attached, and skip detection entirely
-#   UMP_IOS_DEVICE_NAME   ... or pick it by name
-#   UMP_IOS_DEVICE_TIMEOUT
-#                         seconds to wait for the device to appear
-#                         after the Unity build (60)
-#   UMP_IOS_TEAM_ID       Apple Developer team for automatic signing
-#   UMP_IOS_CONFIGURATION Release (default) or Debug
-#   UMP_IOS_LAUNCH=0      install only, do not start the app
-#   UMP_KEYCHAIN_PASSWORD login password of the build user, to
-#                         unlock the keychain Xcode keeps its
-#                         account token in
+# Jenkins/strip_ios_iap.sh must run before this script on
+# release/ios-test. That script removes local IAP capability
+# metadata and switches the device build to a dedicated bundle id.
 #
-# Capabilities are handled by Jenkins/strip_ios_iap.sh, which
-# runs between the Unity build and this script.
+# Optional env vars:
+#   UMP_IOS_PROJECT
+#   IOS_SCHEME=Unity-iPhone
+#   UMP_IOS_CONFIGURATION=Release
+#   UMP_IOS_DEVICE_UDID
+#   UMP_IOS_DEVICE_NAME
+#   UMP_IOS_DEVICE_TIMEOUT=60
+#   UMP_IOS_TEAM_ID
+#   UMP_KEYCHAIN_PASSWORD
+#   UMP_IOS_LAUNCH=0
+#   UMP_ASC_KEY_PATH / UMP_ASC_KEY_ID / UMP_ASC_ISSUER_ID
 # ============================================================
 
 echo "========================================"
@@ -36,31 +34,21 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 CONFIGURATION="${UMP_IOS_CONFIGURATION:-Release}"
+DERIVED="$WORKSPACE/Builds/iOSDerived"
 
-# Jenkins runs outside the GUI session the Apple ID was signed in
-# from, and there the login keychain is locked - the Xcode account
-# token inside it is then invisible and xcodebuild reports "No
-# Accounts" however many accounts Xcode shows on screen.
 if [ -n "${UMP_KEYCHAIN_PASSWORD:-}" ]; then
-
-    if security unlock-keychain -p "$UMP_KEYCHAIN_PASSWORD" \
-        "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null; then
-
+    if security unlock-keychain \
+        -p "$UMP_KEYCHAIN_PASSWORD" \
+        "$HOME/Library/Keychains/login.keychain-db" \
+        >/dev/null 2>&1; then
         echo "[PEARZ] Login keychain unlocked."
-
     else
-
-        echo "[PEARZ] WARNING: could not unlock the login keychain."
-        echo "[PEARZ] Check UMP_KEYCHAIN_PASSWORD."
+        echo "[PEARZ] WARNING: could not unlock login keychain."
     fi
 fi
 
-# Unity exports to Builds/iOS/<Game name>, so look the project up
-# instead of assuming a fixed path.
 PROJECT="${UMP_IOS_PROJECT:-}"
-
 if [ -z "$PROJECT" ]; then
-
     PROJECT="$(find "$WORKSPACE/Builds/iOS" \
         -maxdepth 2 \
         -type d \
@@ -69,97 +57,75 @@ if [ -z "$PROJECT" ]; then
 fi
 
 if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
-    echo "[PEARZ] ERROR: no Xcode project under"
-    echo "$WORKSPACE/Builds/iOS"
-    echo "[PEARZ] Run the Unity iOS build first."
+    echo "[PEARZ] ERROR: no Xcode project under $WORKSPACE/Builds/iOS"
     exit 1
 fi
 
-DERIVED="$WORKSPACE/Builds/iOSDerived"
-
-echo "[PEARZ] Project      : $PROJECT"
-
-# ------------------------------------------------------------
-# Scheme
-# ------------------------------------------------------------
-
-#
-# A Unity project ships several schemes - GameAssembly and
-# UnityFramework are libraries and never produce a .app, so
-# picking the first one in the list builds the wrong thing.
-#
-
-SCHEME="${IOS_SCHEME:-}"
-
-if [ -z "$SCHEME" ]; then
-
+SCHEME="${IOS_SCHEME:-Unity-iPhone}"
+if ! xcodebuild -list -project "$PROJECT" 2>/dev/null \
+    | grep -q "^[[:space:]]*$SCHEME[[:space:]]*$"; then
     SCHEMES="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
-        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {
-            gsub(/^[ \t]+|[ \t]+$/, ""); print }')"
+        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {gsub(/^[ \t]+|[ \t]+$/, ""); print}')"
 
     if echo "$SCHEMES" | grep -qx "Unity-iPhone"; then
-
         SCHEME="Unity-iPhone"
-
     else
-
         SCHEME="$(echo "$SCHEMES" \
-            | grep -vxE "GameAssembly|UnityFramework|Pods-.*" \
+            | grep -vxE 'GameAssembly|UnityFramework|Pods-.*' \
             | head -n 1 || true)"
     fi
 fi
 
-[ -n "$SCHEME" ] || SCHEME="Unity-iPhone"
-
-echo "[PEARZ] Scheme        : $SCHEME"
-echo "[PEARZ] Configuration : $CONFIGURATION"
+if [ -z "$SCHEME" ]; then
+    echo "[PEARZ] ERROR: no app scheme found."
+    exit 1
+fi
 
 SETTINGS="$(xcodebuild -showBuildSettings \
     -project "$PROJECT" \
-    -scheme "$SCHEME" 2>/dev/null || true)"
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    2>/dev/null || true)"
 
 BUNDLE_ID="$(echo "$SETTINGS" \
     | awk -F' = ' '/ PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' \
     | tr -d ' \r' || true)"
 
-[ -n "$BUNDLE_ID" ] && echo "[PEARZ] Bundle id    : $BUNDLE_ID"
+TEAM="${UMP_IOS_TEAM_ID:-}"
+TEAM_SOURCE="UMP_IOS_TEAM_ID"
 
-PBXPROJ="$PROJECT/project.pbxproj"
+if [ -z "$TEAM" ]; then
+    TEAM="$(echo "$SETTINGS" \
+        | awk -F' = ' '/ DEVELOPMENT_TEAM = / {print $2; exit}' \
+        | tr -d ' \r' || true)"
+    TEAM_SOURCE="Xcode project"
+fi
+
+if [ -z "$TEAM" ]; then
+    PBXPROJ="$PROJECT/project.pbxproj"
+    TEAM="$(grep -hoE '(DEVELOPMENT_TEAM|DevelopmentTeam)[ \t]*=[ \t]*"?[A-Z0-9]{10}' \
+        "$PBXPROJ" 2>/dev/null \
+        | grep -oE '[A-Z0-9]{10}$' \
+        | head -n 1 || true)"
+    TEAM_SOURCE="project.pbxproj"
+fi
+
+if [ -z "$TEAM" ]; then
+    echo "[PEARZ] ERROR: no DEVELOPMENT_TEAM found."
+    echo "[PEARZ] Set UMP_IOS_TEAM_ID or select the team once in Xcode."
+    exit 1
+fi
+
+echo "[PEARZ] Project       : $PROJECT"
+echo "[PEARZ] Scheme        : $SCHEME"
+echo "[PEARZ] Configuration : $CONFIGURATION"
+echo "[PEARZ] Bundle id     : ${BUNDLE_ID:-<unknown>}"
+echo "[PEARZ] Team          : $TEAM ($TEAM_SOURCE)"
 
 # ------------------------------------------------------------
-# Device
-#
-# xctrace lists physical devices as
-#   <name> (<ios version>) (<udid>)
-# while the host Mac has no version, which is what separates
-# them. Offline devices sit in their own section.
-#
-# xctrace is the old interface though, and it files a perfectly
-# reachable iOS 17+ device under "Offline" - devicectl is asked
-# whenever it comes up empty.
-#
-# Waiting on top of that covers the seconds right after the Unity
-# build, which tears down a usbmuxd session of its own as the
-# editor exits. It costs nothing when the device is already there.
+# Device discovery
 # ------------------------------------------------------------
-
-list_devices_xctrace() {
-
-    xcrun xctrace list devices 2>/dev/null \
-        | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
-        | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' || true
-}
-
-# devicectl is the service Xcode 15 and up actually talks to, and
-# it reports devices xctrace files under "Offline" - an iPhone on
-# iOS 17+ is often only visible here. The table it prints carries
-# a CoreDevice UUID rather than the UDID xcodebuild wants, so the
-# UDID is read out of the JSON instead.
-#
-# Printed in the same shape as xctrace, so either source feeds the
-# same parsing below: <name> (<state>) (<udid>)
-list_devices_devicectl() {
-
+find_device_devicectl() {
     local json
     local i=0
     local udid
@@ -169,233 +135,90 @@ list_devices_devicectl() {
     xcrun devicectl --version >/dev/null 2>&1 || return 0
 
     json="$(mktemp "${TMPDIR:-/tmp}/ump-devices-XXXXXX")"
-
     if ! xcrun devicectl list devices --json-output "$json" \
         >/dev/null 2>&1; then
-
         rm -f "$json"
         return 0
     fi
 
-    # plutil cannot count an array, so the list ends where the
-    # extraction stops returning a UDID.
-    while [ "$i" -lt 16 ]; do
-
+    while [ "$i" -lt 32 ]; do
         udid="$(plutil -extract "result.devices.$i.hardwareProperties.udid" \
             raw "$json" 2>/dev/null || true)"
-
         [ -n "$udid" ] || break
 
         name="$(plutil -extract "result.devices.$i.deviceProperties.name" \
             raw "$json" 2>/dev/null || true)"
-
-        state="$(plutil -extract \
-            "result.devices.$i.connectionProperties.pairingState" \
+        state="$(plutil -extract "result.devices.$i.connectionProperties.pairingState" \
             raw "$json" 2>/dev/null || true)"
 
         [ -n "$name" ] || name="iPhone"
         [ -n "$state" ] || state="unknown"
 
-        echo "$name ($state) ($udid)"
-
+        echo "$name|$state|$udid"
         i=$((i + 1))
     done
 
     rm -f "$json"
 }
 
-list_devices() {
-
-    local lines
-
-    lines="$(list_devices_xctrace)"
-
-    if [ -z "$lines" ]; then
-
-        lines="$(list_devices_devicectl)"
-
-        if [ -n "$lines" ]; then
-            echo "[PEARZ] Device found through devicectl, not xctrace." >&2
-        fi
-    fi
-
-    if [ -n "${UMP_IOS_DEVICE_NAME:-}" ]; then
-
-        lines="$(echo "$lines" | grep -F "$UMP_IOS_DEVICE_NAME" || true)"
-    fi
-
-    echo "$lines"
+find_device_xctrace() {
+    xcrun xctrace list devices 2>/dev/null \
+        | awk '/^== Devices ==/ {found=1; next} /^== / {found=0} found {print}' \
+        | grep -E '\([0-9]+(\.[0-9]+)+\) \([0-9A-Za-z-]+\)[[:space:]]*$' \
+        | sed -E 's/^(.*) \([^)]*\) \(([0-9A-Za-z-]+)\)[[:space:]]*$/\1|connected|\2/' \
+        || true
 }
 
 UDID="${UMP_IOS_DEVICE_UDID:-}"
+DEVICE_NAME="${UMP_IOS_DEVICE_NAME:-}"
 
 if [ -z "$UDID" ]; then
-
-    DEVICE_LINES="$(list_devices)"
-
     WAIT_FOR="${UMP_IOS_DEVICE_TIMEOUT:-60}"
     WAITED=0
+    DEVICE_LINES=""
 
-    while [ -z "$DEVICE_LINES" ] && [ "$WAITED" -lt "$WAIT_FOR" ]; do
+    while [ -z "$DEVICE_LINES" ] && [ "$WAITED" -le "$WAIT_FOR" ]; do
+        DEVICE_LINES="$(find_device_devicectl)"
+        if [ -z "$DEVICE_LINES" ]; then
+            DEVICE_LINES="$(find_device_xctrace)"
+        fi
+
+        if [ -n "$DEVICE_NAME" ]; then
+            DEVICE_LINES="$(echo "$DEVICE_LINES" \
+                | grep -F "$DEVICE_NAME" || true)"
+        fi
+
+        [ -n "$DEVICE_LINES" ] && break
+        [ "$WAITED" -ge "$WAIT_FOR" ] && break
 
         if [ "$WAITED" -eq 0 ]; then
-            echo "[PEARZ] No device yet - waiting up to ${WAIT_FOR}s for it"
-            echo "[PEARZ] to come back after the Unity build."
+            echo "[PEARZ] Waiting up to ${WAIT_FOR}s for an iOS device..."
         fi
 
         sleep 3
-
         WAITED=$((WAITED + 3))
-
-        DEVICE_LINES="$(list_devices)"
     done
 
-    if [ -n "$DEVICE_LINES" ] && [ "$WAITED" -gt 0 ]; then
-        echo "[PEARZ] Device showed up after ${WAITED}s."
-    fi
-
     if [ -z "$DEVICE_LINES" ]; then
-
-        echo "[PEARZ] ERROR: no iOS device detected."
-
-        # A device that is paired but locked, unplugged or asleep
-        # is listed under its own heading rather than missing, and
-        # that says which of the two problems this is.
-        OFFLINE="$(xcrun xctrace list devices 2>/dev/null \
-            | awk '/^== Devices Offline ==/ {found=1; next} /^== / {found=0} found {print}' \
-            | grep -E '\([0-9A-Za-z-]+\)[[:space:]]*$' || true)"
-
-        if [ -n "$OFFLINE" ]; then
-
-            echo "[PEARZ] Paired with this Mac but offline after"
-            echo "[PEARZ] ${WAITED}s of waiting:"
-            echo "$OFFLINE" | sed 's|^|[PEARZ]   |'
-            echo "[PEARZ] devicectl did not list it either, so the"
-            echo "[PEARZ] device really is unreachable from here."
-            echo "[PEARZ] Unplug and plug the cable once, and set"
-            echo "[PEARZ] UMP_IOS_DEVICE_UDID to skip detection and let"
-            echo "[PEARZ] xcodebuild talk to the device directly."
-
-        else
-
-            echo "[PEARZ] Check that the device is plugged in, unlocked,"
-            echo "[PEARZ] and that it trusts this Mac."
-        fi
-
-        echo "[PEARZ] Devices seen by Xcode:"
-        xcrun xctrace list devices 2>/dev/null || true
-
-        # xctrace and devicectl ask different services, so a device
-        # missing from one is often listed by the other.
-        echo "[PEARZ] Devices seen by devicectl:"
+        echo "[PEARZ] ERROR: no connected iOS device detected."
         xcrun devicectl list devices 2>/dev/null || true
-
+        xcrun xctrace list devices 2>/dev/null || true
         exit 1
     fi
 
-    COUNT="$(echo "$DEVICE_LINES" | grep -c . || true)"
-
-    if [ "$COUNT" -gt 1 ]; then
-        echo "[PEARZ] Several devices attached:"
-        echo "$DEVICE_LINES"
-        echo "[PEARZ] Using the first one."
-        echo "[PEARZ] Set UMP_IOS_DEVICE_UDID or UMP_IOS_DEVICE_NAME to choose."
-    fi
-
     DEVICE_LINE="$(echo "$DEVICE_LINES" | head -n 1)"
-
-    UDID="$(echo "$DEVICE_LINE" \
-        | sed -E 's/.*\(([0-9A-Za-z-]+)\)[[:space:]]*$/\1/')"
-
-    DEVICE_NAME="$(echo "$DEVICE_LINE" \
-        | sed -E 's/ \([^)]*\) \([^)]*\)[[:space:]]*$//')"
-
-    echo "[PEARZ] Device       : $DEVICE_NAME"
+    DEVICE_NAME="$(echo "$DEVICE_LINE" | cut -d'|' -f1)"
+    UDID="$(echo "$DEVICE_LINE" | awk -F'|' '{print $NF}')"
 fi
 
-echo "[PEARZ] Device UDID  : $UDID"
+echo "[PEARZ] Device        : ${DEVICE_NAME:-iPhone}"
+echo "[PEARZ] Device UDID   : $UDID"
 
 # ------------------------------------------------------------
-# Provisioning pre-flight
-#
-# A signing certificate in the keychain is not enough: to create
-# a provisioning profile, Xcode needs an Apple ID signed in as
-# the user Jenkins runs as, or an App Store Connect API key.
+# Build
 # ------------------------------------------------------------
-
-PROFILE_DIRS=(
-    "$HOME/Library/MobileDevice/Provisioning Profiles"
-    "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-)
-
-# Name of a profile on this Mac that covers the bundle id, which
-# is also what manual signing needs to be handed later on.
-find_profile_for() {
-
-    local bundle="$1"
-    local dir
-    local profile
-    local plist
-    local app_id
-    local name
-
-    [ -n "$bundle" ] || return 1
-
-    for dir in "${PROFILE_DIRS[@]}"; do
-
-        [ -d "$dir" ] || continue
-
-        for profile in "$dir"/*.mobileprovision; do
-
-            [ -f "$profile" ] || continue
-
-            plist="$(security cms -D -i "$profile" 2>/dev/null || true)"
-
-            [ -n "$plist" ] || continue
-
-            app_id="$(echo "$plist" \
-                | plutil -extract Entitlements.application-identifier raw - \
-                    2>/dev/null || true)"
-
-            [ -n "$app_id" ] || continue
-
-            # A wildcard profile carries no capability of its own,
-            # so it signs this build just as well.
-            case "$app_id" in
-                *".$bundle"|*".*") ;;
-                *) continue ;;
-            esac
-
-            name="$(echo "$plist" \
-                | plutil -extract Name raw - 2>/dev/null || true)"
-
-            [ -n "$name" ] || continue
-
-            echo "$name"
-            return 0
-        done
-    done
-
-    return 1
-}
-
-has_profile_for() {
-
-    [ -n "$(find_profile_for "$1" || true)" ]
-}
-
-USING_API_KEY=0
-
-if [ -n "${UMP_ASC_KEY_PATH:-}" ] && \
-   [ -n "${UMP_ASC_KEY_ID:-}" ] && \
-   [ -n "${UMP_ASC_ISSUER_ID:-}" ]; then
-
-    USING_API_KEY=1
-fi
-
-# ------------------------------------------------------------
-# Build for that device
-# ------------------------------------------------------------
+rm -rf "$DERIVED"
+mkdir -p "$DERIVED"
 
 BUILD_ARGS=(
     -project "$PROJECT"
@@ -404,377 +227,52 @@ BUILD_ARGS=(
     -destination "id=$UDID"
     -derivedDataPath "$DERIVED"
     -allowProvisioningUpdates
+    "DEVELOPMENT_TEAM=$TEAM"
+    "CODE_SIGN_STYLE=Automatic"
 )
 
-# Reads the team out of the signing certificates installed on this
-# Mac. The team id is the OU of an Apple Development certificate.
-detect_team() {
-
-    local names
-    local team
-    local found=""
-
-    names="$(security find-identity -v -p codesigning 2>/dev/null \
-        | sed -n 's/.*"\(Apple Development[^"]*\)".*/\1/p
-                  s/.*"\(iPhone Developer[^"]*\)".*/\1/p')"
-
-    [ -n "$names" ] || return 0
-
-    while IFS= read -r name; do
-
-        [ -n "$name" ] || continue
-
-        team="$(security find-certificate -c "$name" -p 2>/dev/null \
-            | openssl x509 -noout -subject 2>/dev/null \
-            | tr '/,' '\n\n' \
-            | sed -n 's/^[[:space:]]*OU[[:space:]]*=[[:space:]]*\([A-Z0-9]\{10\}\).*/\1/p' \
-            | head -n 1)"
-
-        [ -n "$team" ] && found="$found$team
-"
-    done <<INNER
-$names
-INNER
-
-    echo "$found" | grep -v '^$' | sort -u
-}
-
-# Teams of the Apple IDs signed in to Xcode. These are the only
-# ones automatic signing can actually create a profile for - a
-# leftover certificate in the keychain proves nothing.
-detect_account_teams() {
-
-    local teams=""
-
-    # Where Xcode keeps this moves between versions, so read the
-    # preference and the provisioning profiles it downloaded.
-    teams="$(defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
-        | sed -n 's/.*teamID[[:space:]]*=[[:space:]]*"\{0,1\}\([A-Z0-9]\{10\}\)"\{0,1\}.*/\1/p' \
-        || true)"
-
-    local dir
-    local profile
-    local team
-
-    for dir in "${PROFILE_DIRS[@]}"; do
-
-        [ -d "$dir" ] || continue
-
-        for profile in "$dir"/*.mobileprovision; do
-
-            [ -f "$profile" ] || continue
-
-            team="$(security cms -D -i "$profile" 2>/dev/null \
-                | plutil -extract TeamIdentifier.0 raw - 2>/dev/null || true)"
-
-            [ -n "$team" ] && teams="$teams
-$team"
-        done
-    done
-
-    echo "$teams" | grep -E '^[A-Z0-9]{10}$' | sort -u || true
-}
-
-TEAM="${UMP_IOS_TEAM_ID:-}"
-TEAM_SOURCE="UMP_IOS_TEAM_ID"
-
-if [ -z "$TEAM" ]; then
-
-    # Unity writes the Player Settings team into the project.
-    TEAM="$(echo "$SETTINGS" \
-        | awk -F' = ' '/ DEVELOPMENT_TEAM = / {print $2; exit}' \
-        | tr -d ' \r' || true)"
-
-    TEAM_SOURCE="Player Settings"
-fi
-
-ACCOUNT_TEAMS="$(detect_account_teams || true)"
-
-if [ -z "$TEAM" ]; then
-
-    COUNT="$(echo "$ACCOUNT_TEAMS" | grep -c . || true)"
-
-    if [ "$COUNT" -eq 1 ]; then
-
-        TEAM="$ACCOUNT_TEAMS"
-        TEAM_SOURCE="Apple ID signed in to Xcode"
-
-    elif [ "$COUNT" -gt 1 ]; then
-
-        echo "[PEARZ] Several teams signed in to Xcode:"
-        echo "$ACCOUNT_TEAMS"
-        echo "[PEARZ] Set UMP_IOS_TEAM_ID or Player Settings ->"
-        echo "[PEARZ] iOS -> Signing Team ID to pick one."
-    fi
-fi
-
-if [ -z "$TEAM" ]; then
-
-    DETECTED="$(detect_team || true)"
-
-    COUNT="$(echo "$DETECTED" | grep -c . || true)"
-
-    if [ "$COUNT" -eq 1 ]; then
-
-        TEAM="$DETECTED"
-        TEAM_SOURCE="signing certificate on this Mac"
-
-    elif [ "$COUNT" -gt 1 ]; then
-
-        echo "[PEARZ] Several signing teams on this Mac:"
-        echo "$DETECTED"
-        echo "[PEARZ] Set UMP_IOS_TEAM_ID or Player Settings ->"
-        echo "[PEARZ] iOS -> Signing Team ID to pick one."
-    fi
-fi
-
-# Forcing a team the signed-in account does not belong to fails
-# with "No profiles for ... were found", which reads like a
-# missing account rather than a mismatch.
-if [ -n "$TEAM" ] && [ -n "$ACCOUNT_TEAMS" ] && \
-   ! echo "$ACCOUNT_TEAMS" | grep -qx "$TEAM"; then
-
-    echo "[PEARZ] WARNING: team $TEAM ($TEAM_SOURCE) is not one of"
-    echo "[PEARZ] the teams signed in to Xcode:"
-    echo "$ACCOUNT_TEAMS" | sed 's/^/[PEARZ]   /'
-    echo "[PEARZ] Automatic signing cannot create a profile for it."
-fi
-
-if [ -n "$TEAM" ]; then
-
-    echo "[PEARZ] Team         : $TEAM ($TEAM_SOURCE)"
-
+if [ -n "${UMP_ASC_KEY_PATH:-}" ] && \
+   [ -n "${UMP_ASC_KEY_ID:-}" ] && \
+   [ -n "${UMP_ASC_ISSUER_ID:-}" ]; then
     BUILD_ARGS+=(
-        "DEVELOPMENT_TEAM=$TEAM"
-        "CODE_SIGN_STYLE=Automatic"
+        -authenticationKeyPath "$UMP_ASC_KEY_PATH"
+        -authenticationKeyID "$UMP_ASC_KEY_ID"
+        -authenticationKeyIssuerID "$UMP_ASC_ISSUER_ID"
     )
-
-    if [ "$USING_API_KEY" -eq 1 ]; then
-
-        echo "[PEARZ] Auth         : App Store Connect API key"
-
-        BUILD_ARGS+=(
-            -authenticationKeyPath "$UMP_ASC_KEY_PATH"
-            -authenticationKeyID "$UMP_ASC_KEY_ID"
-            -authenticationKeyIssuerID "$UMP_ASC_ISSUER_ID"
-        )
-    fi
-
-else
-
-    echo "[PEARZ] ERROR: no signing team, xcodebuild cannot sign."
-    echo "[PEARZ] No Apple Development certificate on this Mac and"
-    echo "[PEARZ] no team in Player Settings."
-    echo "[PEARZ] Fix on the Mac: Xcode -> Settings -> Accounts -> +"
-    echo "[PEARZ] and sign in with any Apple ID. A free account gives"
-    echo "[PEARZ] a Personal Team; the app then runs 7 days on the"
-    echo "[PEARZ] device. Re-run afterwards."
-    echo "[PEARZ] Or set UMP_IOS_TEAM_ID in Jenkins, or fill"
-    echo "[PEARZ] Player Settings -> iOS -> Signing Team ID."
-
-    exit 1
 fi
-
-# Where Xcode records signed-in accounts differs between
-# versions, so treat a negative result as a hint only - never
-# block a build on it. xcodebuild has the final word.
-has_xcode_account() {
-
-    defaults read com.apple.dt.Xcode IDEProvisioningTeams \
-        >/dev/null 2>&1 && return 0
-
-    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists \
-        >/dev/null 2>&1 && return 0
-
-    security find-generic-password -s "Xcode-Token" \
-        >/dev/null 2>&1 && return 0
-
-    return 1
-}
-
-signing_help() {
-
-    local profiles=0
-    local dir
-    local token="NOT visible from this session"
-
-    for dir in "${PROFILE_DIRS[@]}"; do
-        [ -d "$dir" ] || continue
-        profiles=$((profiles + $(ls -1 "$dir"/*.mobileprovision 2>/dev/null | wc -l | tr -d ' ')))
-    done
-
-    security find-generic-password -s "Xcode-Token" >/dev/null 2>&1 &&
-        token="found"
-
-    echo "[PEARZ]"
-    echo "[PEARZ] --- signing diagnostics ---"
-    echo "[PEARZ] build user          : $(id -un 2>/dev/null || echo unknown)"
-    echo "[PEARZ] home                : $HOME"
-    echo "[PEARZ] Xcode account token : $token"
-    echo "[PEARZ] teams signed in     : ${ACCOUNT_TEAMS:-<none>}"
-    echo "[PEARZ] team used for build : $TEAM ($TEAM_SOURCE)"
-    echo "[PEARZ] provisioning profiles: $profiles"
-    echo "[PEARZ] keychains in search list:"
-
-    security list-keychains 2>/dev/null | sed 's/^/[PEARZ]   /' || true
-
-    echo "[PEARZ]"
-
-    if [ "$token" = "found" ]; then
-
-        echo "[PEARZ] An Xcode account IS visible, so this is most"
-        echo "[PEARZ] likely the login keychain being locked for the"
-        echo "[PEARZ] Jenkins session. Unlock it before the build:"
-        echo "[PEARZ]   security unlock-keychain -p <password> \\"
-        echo "[PEARZ]     ~/Library/Keychains/login.keychain-db"
-        echo "[PEARZ] Running Jenkins as a LaunchAgent inside the"
-        echo "[PEARZ] user's GUI session avoids this for good."
-        echo "[PEARZ]"
-
-        return
-    fi
-
-    echo "[PEARZ] Xcode needs an Apple ID signed in to create the"
-    echo "[PEARZ] provisioning profile for $BUNDLE_ID - a certificate"
-    echo "[PEARZ] in the keychain is not enough."
-    echo "[PEARZ]"
-    echo "[PEARZ] On this Mac, logged in as the user Jenkins runs as"
-    echo "[PEARZ] (${USER:-unknown}): Xcode -> Settings -> Accounts -> +"
-    echo "[PEARZ] -> Apple Account. A free Apple ID is enough for a"
-    echo "[PEARZ] test device; an account in team $TEAM reuses the"
-    echo "[PEARZ] certificate already installed here."
-    echo "[PEARZ]"
-    echo "[PEARZ] Headless alternative (paid account): create an App"
-    echo "[PEARZ] Store Connect API key and set UMP_ASC_KEY_PATH,"
-    echo "[PEARZ] UMP_ASC_KEY_ID and UMP_ASC_ISSUER_ID in Jenkins."
-}
-
-if [ "$USING_API_KEY" -eq 0 ] && \
-   ! has_xcode_account && \
-   ! has_profile_for "$BUNDLE_ID"; then
-
-    echo "[PEARZ] Note: no signed-in Xcode account found."
-    echo "[PEARZ] Building anyway - Xcode may still know better."
-fi
-
-# Capabilities are stripped by Jenkins/strip_ios_iap.sh, which
-# runs after the Unity editor has exited and therefore after
-# every post-process build callback that could add one back.
-
-rm -rf "$DERIVED"
 
 BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodebuild-XXXXXX")"
 
-# Each attempt overwrites BUILD_LOG, so the reason the first one
-# failed is gone by the time the diagnostics run. Keeping the
-# error lines of every attempt is what lets them report on all of
-# them - "No Accounts" only ever shows up in the first.
-ERROR_LOG="$(mktemp "${TMPDIR:-/tmp}/ump-xcodeerrors-XXXXXX")"
+echo "========================================"
+echo "[PEARZ] xcodebuild"
+echo "========================================"
 
-record_errors() {
-
-    grep -E "error:|No Accounts" "$BUILD_LOG" >> "$ERROR_LOG" 2>/dev/null || true
-}
-
-BUILD_OK=1
-
-xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
-
-record_errors
-
-capability_refused() {
-
-    grep -qE \
-        "do not support the|does not support the|doesn't include the .*capability" \
-        "$BUILD_LOG"
-}
-
-# A free Personal Team cannot sign In-App Purchase, push and
-# friends: "Personal development teams ... do not support the
-# In-App Purchase capability". The capability is stripped from
-# the project above, but Xcode also derives what a profile must
-# contain from the entitlements file the target points at, and
-# Unity writes that file in a different place per version.
-#
-# Building with no entitlements at all settles it. The device
-# test build loses IAP, push and keychain sharing; the App Store
-# path (release/ios) never comes through here, so nothing that
-# ships is affected.
-if [ "$BUILD_OK" -eq 0 ] && capability_refused; then
-
-    echo "========================================"
-    echo "[PEARZ] This team cannot sign a capability the project asks"
-    echo "[PEARZ] for. Retrying without entitlements - test build only."
-    echo "========================================"
-
-    rm -rf "$DERIVED"
-
-    BUILD_OK=1
-
-    xcodebuild "${BUILD_ARGS[@]}" \
-        CODE_SIGN_ENTITLEMENTS="" \
-        build 2>&1 | tee "$BUILD_LOG" || BUILD_OK=0
-
-    record_errors
-fi
-
-
-if [ "$BUILD_OK" -eq 0 ]; then
-
+if ! xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG"; then
     echo "[PEARZ] ERROR: xcodebuild failed."
 
-    if grep -qE "No Accounts|No profiles for|requires a development team" \
-        "$ERROR_LOG"; then
-
-        signing_help
+    if grep -q "In-App Purchase capability" "$BUILD_LOG"; then
+        echo "[PEARZ] IAP signing is still being requested."
+        echo "[PEARZ] Expected device bundle id: ${BUNDLE_ID:-<unknown>}"
+        echo "[PEARZ] Check Jenkins/strip_ios_iap.sh output immediately above."
+        echo "[PEARZ] For release/ios-test it should end in '.device' unless"
+        echo "[PEARZ] UMP_IOS_KEEP_BUNDLE_ID=1 is explicitly set."
     fi
 
-    if grep -qE "do not support the|does not support the|doesn't include the .*capability" \
-        "$ERROR_LOG"; then
-
-        echo "[PEARZ]"
-        echo "[PEARZ] --- capability not signable by this team ---"
-        echo "[PEARZ] Team $TEAM is a free Personal Team, and Apple does"
-        echo "[PEARZ] not issue one a development profile carrying"
-        echo "[PEARZ] In-App Purchase."
-        echo "[PEARZ]"
-        echo "[PEARZ] Nothing in the project asks for it: no capability"
-        echo "[PEARZ] block, no entitlements file, and a bundle id whose"
-        echo "[PEARZ] App ID was created fresh fails the same way. Xcode"
-        echo "[PEARZ] reads the requirement off the app itself - the"
-        echo "[PEARZ] Unity IAP plugin links StoreKit, and automatic"
-        echo "[PEARZ] signing puts In-App Purchase on the App ID for any"
-        echo "[PEARZ] app that does. No edit to the exported project"
-        echo "[PEARZ] takes that back."
-        echo "[PEARZ]"
-        echo "[PEARZ] Two ways out, both outside this script:"
-        echo "[PEARZ]"
-        echo "[PEARZ]  - An Apple Developer Program team. Sign that"
-        echo "[PEARZ]    Apple ID in to Xcode -> Settings -> Accounts"
-        echo "[PEARZ]    and set UMP_IOS_TEAM_ID to its team id. It"
-        echo "[PEARZ]    signs In-App Purchase, so the device build"
-        echo "[PEARZ]    matches what ships. This is the only option"
-        echo "[PEARZ]    that keeps the build identical to the store."
-        echo "[PEARZ]"
-        echo "[PEARZ]  - A build with no Unity IAP in it: drop"
-        echo "[PEARZ]    com.unity.purchasing from Packages/manifest.json"
-        echo "[PEARZ]    on this branch and guard the code that calls it."
-        echo "[PEARZ]    Without StoreKit there is no capability to sign,"
-        echo "[PEARZ]    and purchases cannot be tested on the device."
-        echo "[PEARZ]"
+    if grep -qE 'No Accounts|No profiles for|requires a development team' "$BUILD_LOG"; then
+        echo "[PEARZ] Signing account/profile problem detected."
+        echo "[PEARZ] Ensure Xcode is signed in for team $TEAM and the Jenkins"
+        echo "[PEARZ] user can access its login keychain."
     fi
 
-    rm -f "$BUILD_LOG" "$ERROR_LOG"
-
+    rm -f "$BUILD_LOG"
     exit 1
 fi
 
-rm -f "$BUILD_LOG" "$ERROR_LOG"
+rm -f "$BUILD_LOG"
 
 # ------------------------------------------------------------
-# Locate the .app
+# Find app
 # ------------------------------------------------------------
-
 APP="$(find "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" \
     -maxdepth 1 \
     -type d \
@@ -782,76 +280,55 @@ APP="$(find "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" \
     2>/dev/null | head -n 1 || true)"
 
 if [ -z "$APP" ]; then
-
-    echo "[PEARZ] ERROR: built .app not found under"
-    echo "$DERIVED/Build/Products/$CONFIGURATION-iphoneos"
-    echo "[PEARZ] Scheme '$SCHEME' produced:"
-
-    ls -1 "$DERIVED/Build/Products/$CONFIGURATION-iphoneos" 2>/dev/null || true
-
-    echo "[PEARZ] A library-only scheme (GameAssembly, UnityFramework)"
-    echo "[PEARZ] builds no app. Set IOS_SCHEME to the app scheme."
-
+    echo "[PEARZ] ERROR: built .app not found."
     exit 1
 fi
 
-echo "[PEARZ] App          : $APP"
+APP_BUNDLE_ID="$(/usr/libexec/PlistBuddy \
+    -c 'Print :CFBundleIdentifier' \
+    "$APP/Info.plist" 2>/dev/null || true)"
+
+echo "[PEARZ] App           : $APP"
+echo "[PEARZ] App bundle id : ${APP_BUNDLE_ID:-<unknown>}"
 
 # ------------------------------------------------------------
 # Install
 # ------------------------------------------------------------
-
 INSTALLED=0
 
 if xcrun devicectl --version >/dev/null 2>&1; then
-
     echo "[PEARZ] Installing with devicectl..."
-
     if xcrun devicectl device install app \
         --device "$UDID" \
         "$APP"; then
-
         INSTALLED=1
     fi
 fi
 
 if [ "$INSTALLED" -eq 0 ] && command -v ios-deploy >/dev/null 2>&1; then
-
     echo "[PEARZ] Installing with ios-deploy..."
-
     if ios-deploy --id "$UDID" --bundle "$APP" --no-wifi; then
         INSTALLED=1
     fi
 fi
 
 if [ "$INSTALLED" -eq 0 ]; then
-    echo "[PEARZ] ERROR: install failed."
-    echo "[PEARZ] Unlock the device and accept the trust prompt,"
-    echo "[PEARZ] or install ios-deploy: brew install ios-deploy"
+    echo "[PEARZ] ERROR: app installation failed."
+    echo "[PEARZ] Unlock the device and confirm Trust/Developer Mode."
     exit 1
 fi
 
 echo "[PEARZ] Installed on $UDID"
 
 # ------------------------------------------------------------
-# Launch (best effort)
+# Launch, best effort
 # ------------------------------------------------------------
-
-if [ "${UMP_IOS_LAUNCH:-1}" != "0" ]; then
-
-    BUNDLE_ID="$(/usr/libexec/PlistBuddy \
-        -c "Print :CFBundleIdentifier" \
-        "$APP/Info.plist" 2>/dev/null || true)"
-
-    if [ -n "$BUNDLE_ID" ]; then
-
-        echo "[PEARZ] Launching $BUNDLE_ID..."
-
-        xcrun devicectl device process launch \
-            --device "$UDID" \
-            "$BUNDLE_ID" || \
-            echo "[PEARZ] Launch skipped (install still succeeded)."
-    fi
+if [ "${UMP_IOS_LAUNCH:-1}" != "0" ] && [ -n "$APP_BUNDLE_ID" ]; then
+    echo "[PEARZ] Launching $APP_BUNDLE_ID..."
+    xcrun devicectl device process launch \
+        --device "$UDID" \
+        "$APP_BUNDLE_ID" || \
+        echo "[PEARZ] Launch skipped; install succeeded."
 fi
 
 echo "========================================"
