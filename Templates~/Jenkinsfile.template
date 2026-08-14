@@ -216,6 +216,92 @@ pipeline {
         }
 
         // ====================================================
+        // GIT SUBMODULES
+        //
+        // Unity local packages can live in SSH git submodules
+        // (for example Packages/com.pearz.thirdparty). Jenkins'
+        // normal checkout does not necessarily populate them, so
+        // initialise/update them before Unity starts Package Manager.
+        //
+        // Credential expected in Jenkins:
+        //   github-ssh  (SSH Username with private key)
+        // ====================================================
+
+        stage('Git Submodules') {
+
+            when {
+                expression {
+                    [
+                        'release/android',
+                        'release/android-test',
+                        'release/ios-test',
+                        'release/ios'
+                    ].contains(env.BRANCH_NAME)
+                }
+            }
+
+            steps {
+                script {
+
+                    if (!fileExists('.gitmodules')) {
+                        echo '[PEARZ] No .gitmodules file - submodule step skipped.'
+                        return
+                    }
+
+                    sshagent(credentials: ['github-ssh']) {
+                        sh '''
+                            set -e
+
+                            echo "========================================"
+                            echo "[PEARZ] GIT SUBMODULES"
+                            echo "[PEARZ] Workspace : $WORKSPACE"
+                            echo "========================================"
+
+                            export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new'
+
+                            git submodule sync --recursive
+
+                            # Jenkins reuses the custom workspace. Reset any
+                            # already-initialised submodule so a previous build
+                            # cannot leave it on a dirty/stale revision.
+                            git submodule foreach --recursive 'git reset --hard || true'
+                            git submodule foreach --recursive 'git clean -fd || true'
+
+                            git submodule update \
+                                --init \
+                                --recursive \
+                                --force
+
+                            echo "[PEARZ] Submodule status:"
+                            git submodule status --recursive
+
+                            # This package is used as a Unity local dependency
+                            # in projects that include this submodule. Verify it
+                            # only when the path is declared in .gitmodules so
+                            # other Pearz projects are not forced to contain it.
+                            if git config -f .gitmodules \
+                                --get-regexp '^submodule[.].*[.]path$' \
+                                | awk '{print $2}' \
+                                | grep -qx 'Packages/com.pearz.thirdparty'; then
+
+                                PACKAGE_JSON="Packages/com.pearz.thirdparty/package.json"
+
+                                if [ ! -f "$PACKAGE_JSON" ]; then
+                                    echo "[PEARZ] ERROR: Missing $PACKAGE_JSON after submodule update."
+                                    exit 1
+                                fi
+
+                                echo "[PEARZ] com.pearz.thirdparty ready."
+                            fi
+
+                            echo "[PEARZ] Git submodules ready."
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ====================================================
         // ANDROID AAB
         // release/android
         // ====================================================
