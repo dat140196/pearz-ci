@@ -17,8 +17,9 @@ Destination behavior:
 - Older same-name duplicates are trashed unless UMP_DRIVE_KEEP_DUPLICATES=1.
 - UMP_DRIVE_SUBPATH overrides the generated subpath; an explicitly empty
   value uploads directly into UMP_DRIVE_FOLDER_ID.
-- If <GameName>_BUILD_INFO.txt exists beside the artifact (or directly under
-  Builds/), it is uploaded into the SAME Drive folder as the artifact. Its
+- If <GameName>_BUILD_INFO.txt exists beside the Android artifact, it is
+  uploaded into the SAME Drive folder as the artifact. No fallback outside the
+  artifact directory is allowed. Its
   Drive name gets a version suffix, e.g. MeowTrail_BUILD_INFO_v1.2.3.txt.
   Rebuilding the same version updates that same Drive file/revision.
 - UMP_DRIVE_BUILD_INFO_ONLY=1 uploads exactly the supplied *_BUILD_INFO.txt
@@ -477,15 +478,17 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
+    # Android companion metadata must live beside the exact artifact being
+    # uploaded. Do not search Builds/ or other directories: persistent Jenkins
+    # workspaces can contain stale BUILD_INFO files from another build.
     artifact_dir = os.path.abspath(os.path.dirname(artifact) or ".")
-    search_dirs = [artifact_dir]
-
-    builds_root = os.path.abspath("Builds")
-    if builds_root not in search_dirs:
-        search_dirs.append(builds_root)
 
     preferred = []
-    for name in (info.get("PRODUCT_NAME_SAFE", ""), info.get("PRODUCT_NAME", ""), game_name(info)):
+    for name in (
+        info.get("PRODUCT_NAME_SAFE", ""),
+        info.get("PRODUCT_NAME", ""),
+        game_name(info),
+    ):
         name = (name or "").strip()
         if name:
             preferred.append(name + "_BUILD_INFO.txt")
@@ -497,29 +500,13 @@ def find_companion_build_info(artifact, info):
     seen = set()
     preferred = [x for x in preferred if not (x in seen or seen.add(x))]
 
-    for directory in search_dirs:
-        if not os.path.isdir(directory):
-            continue
-        for file_name in preferred:
-            candidate = os.path.join(directory, file_name)
-            if os.path.isfile(candidate):
-                return candidate
+    if not os.path.isdir(artifact_dir):
+        return ""
 
-    # Fallback for projects that generate the conventional *_BUILD_INFO.txt
-    # but sanitize the game name differently from UMP. Only auto-pick it when
-    # the directory contains exactly one such file, so stale files cannot be
-    # selected ambiguously.
-    for directory in search_dirs:
-        if not os.path.isdir(directory):
-            continue
-        matches = sorted(
-            os.path.join(directory, entry)
-            for entry in os.listdir(directory)
-            if entry.endswith("_BUILD_INFO.txt")
-            and os.path.isfile(os.path.join(directory, entry))
-        )
-        if len(matches) == 1:
-            return matches[0]
+    for file_name in preferred:
+        candidate = os.path.join(artifact_dir, file_name)
+        if os.path.isfile(candidate):
+            return candidate
 
     return ""
 

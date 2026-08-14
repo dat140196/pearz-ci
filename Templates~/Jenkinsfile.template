@@ -617,18 +617,23 @@ pipeline {
 
                                 SAFE="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' \
                                     "$INFO" | tr -d '\r')"
+                                EXPORT_DIR="$(awk -F= '/^ARTIFACT=/ {print substr($0, index($0, "=") + 1); exit}' \
+                                    "$INFO" | tr -d '\r')"
 
-                                if [ -z "$SAFE" ]; then
-                                    SAFE="Game"
+                                if [ -z "$SAFE" ] || [ -z "$EXPORT_DIR" ]; then
+                                    exit 0
                                 fi
 
-                                TARGET="Builds/${SAFE}_BUILD_INFO.txt"
+                                IOS_ROOT="$(dirname "$EXPORT_DIR")"
+                                TARGET="${IOS_ROOT}/${SAFE}_BUILD_INFO.txt"
 
-                                # New JenkinsBuild.cs writes this directly.
-                                # Keep this fallback so a generated project with
-                                # an older JenkinsBuild.cs can still upload info.
+                                # iOS BUILD_INFO sits beside the game Xcode export
+                                # directory under Builds/iOS. Never synthesize/copy a
+                                # fallback from Builds/ump_build_info.txt because
+                                # that can upload metadata from the wrong location.
                                 if [ ! -f "$TARGET" ]; then
-                                    cp "$INFO" "$TARGET"
+                                    echo "[PEARZ] ERROR: iOS BUILD_INFO not found: $TARGET" >&2
+                                    exit 1
                                 fi
 
                                 printf '%s\n' "$TARGET"
@@ -819,7 +824,7 @@ pipeline {
                         'Builds/**/*.apk,' +
                         'Builds/**/*.aab,' +
                         'Builds/**/*.ipa,' +
-                        'Builds/*_BUILD_INFO.txt,' +
+                        'Builds/**/*_BUILD_INFO.txt,' +
                         'Builds/ump_build_info.txt,' +
                         'Builds/ump_build_info_drive_url.txt,' +
                         'Builds/ump_drive_url.txt',

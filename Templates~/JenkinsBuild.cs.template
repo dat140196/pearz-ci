@@ -11,8 +11,8 @@ using UnityEditor.iOS.Xcode;
 
 public static class JenkinsBuild
 {
-    // Written next to the artifact so the Jenkins shell scripts
-    // know the product name / version without parsing Unity files.
+    // Jenkins metadata used by shell scripts. A separate human-readable
+    // BUILD_INFO file is written into the platform output root.
     private const string InfoFile = "Builds/ump_build_info.txt";
 
     public static void BuildAndroidAab() => BuildAndroid("Builds/Android", ".aab", true);
@@ -323,11 +323,22 @@ public static class JenkinsBuild
             string content = string.Join("\n", lines) + "\n";
             File.WriteAllText(InfoFile, content);
 
-            // Human-readable companion file used by Drive uploads. Keep the
-            // stable internal ump_build_info.txt for Jenkins/Telegram, while
-            // also exposing the conventional <GameName>_BUILD_INFO.txt.
-            string gameInfoFile =
-                "Builds/" + Sanitize(PlayerSettings.productName) + "_BUILD_INFO.txt";
+            // Human-readable companion file used by Drive uploads.
+            // IMPORTANT: use the parent of ARTIFACT for every platform:
+            //   Android ARTIFACT is a file -> same directory as .apk / .aab
+            //   iOS ARTIFACT is Builds/iOS/<Game> -> parent is Builds/iOS
+            // Keep Builds/ump_build_info.txt only as Jenkins/Telegram metadata.
+            string companionDirectory = Path.GetDirectoryName(artifact);
+
+            if (string.IsNullOrEmpty(companionDirectory))
+                companionDirectory = "Builds";
+
+            Directory.CreateDirectory(companionDirectory);
+
+            string gameInfoFile = Path.Combine(
+                companionDirectory,
+                Sanitize(PlayerSettings.productName) + "_BUILD_INFO.txt");
+
             File.WriteAllText(gameInfoFile, content);
 
             UnityEngine.Debug.Log("[UMP] Build info: " + InfoFile);
