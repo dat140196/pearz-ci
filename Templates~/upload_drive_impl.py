@@ -475,11 +475,11 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
-    # The Unity project's build-info plugin owns BUILD_INFO. CI must only
-    # discover an existing file; it never creates, renames, or rewrites it.
-    # Android builds and iOS exports can use different product prefixes, so
-    # the filename is intentionally discovered from the artifact directory
-    # instead of being derived from PRODUCT_NAME or the artifact stem.
+    # The Unity project's build-info plugin owns *_BUILD_INFO.txt. CI only
+    # discovers and uploads an existing file; it never creates, renames, or
+    # rewrites it. Unity/exports may leave stale BUILD_INFO files in a reused
+    # directory, so choose the newest matching file rather than failing on
+    # duplicates. Matching is case-insensitive for the suffix.
     artifact = os.path.abspath(artifact)
     artifact_dir = os.path.dirname(artifact) or "."
 
@@ -488,28 +488,36 @@ def find_companion_build_info(artifact, info):
 
     matches = []
     try:
-        for name in os.listdir(artifact_dir):
-            lower = name.lower()
-            if not lower.endswith("_build_info.txt"):
-                continue
-            if lower.startswith("ump_"):
-                continue
-            candidate = os.path.join(artifact_dir, name)
-            if os.path.isfile(candidate):
-                matches.append(candidate)
+        for root, _dirs, files in os.walk(artifact_dir):
+            for name in files:
+                lower = name.lower()
+                if lower.startswith("ump_") or not lower.endswith("_build_info.txt"):
+                    continue
+                candidate = os.path.join(root, name)
+                if os.path.isfile(candidate):
+                    try:
+                        mtime = os.path.getmtime(candidate)
+                    except OSError:
+                        continue
+                    matches.append((mtime, candidate))
     except OSError:
         return ""
 
-    if len(matches) == 1:
-        return matches[0]
+    if not matches:
+        return ""
+
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = matches[0][1]
 
     if len(matches) > 1:
-        raise RuntimeError(
-            "Multiple plugin BUILD_INFO files found beside artifact %s: %s"
-            % (artifact, ", ".join(sorted(matches)))
+        log(
+            "Multiple plugin BUILD_INFO files found under %s; selecting newest: %s"
+            % (artifact_dir, selected)
         )
+        for _mtime, candidate in matches:
+            log("  BUILD_INFO candidate: " + candidate)
 
-    return ""
+    return selected
 
 
 def upload(access_token, folder_id, file_path, remote_name=None, url_file=None):
