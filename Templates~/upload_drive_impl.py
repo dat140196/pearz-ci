@@ -17,10 +17,11 @@ Destination behavior:
 - Older same-name duplicates are trashed unless UMP_DRIVE_KEEP_DUPLICATES=1.
 - UMP_DRIVE_SUBPATH overrides the generated subpath; an explicitly empty
   value uploads directly into UMP_DRIVE_FOLDER_ID.
-- If <GameName>_BUILD_INFO.txt exists beside the Android artifact, it is
-  uploaded into the SAME Drive folder as the artifact. No fallback outside the
-  artifact directory is allowed. Its
-  Drive name gets a version suffix, e.g. MeowTrail_BUILD_INFO_v1.2.3.txt.
+- Android BUILD_INFO must match the exact artifact stem, e.g.
+  MeowTrail-v1.2.3.apk -> MeowTrail-v1.2.3_BUILD_INFO.txt. It is uploaded
+  into the SAME Drive folder as the artifact. No fallback to
+  <GameName>_BUILD_INFO.txt is allowed. Its Drive name remains
+  MeowTrail_BUILD_INFO_v1.2.3.txt.
   Rebuilding the same version updates that same Drive file/revision.
 - UMP_DRIVE_BUILD_INFO_ONLY=1 uploads exactly the supplied *_BUILD_INFO.txt
   into <Game name>/IOS, without a version suffix and without a companion upload.
@@ -478,55 +479,45 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
-    # Android companion metadata must live beside the exact artifact being
-    # uploaded. Do not search Builds/ or other directories: persistent Jenkins
-    # workspaces can contain stale BUILD_INFO files from another build.
-    artifact_dir = os.path.abspath(os.path.dirname(artifact) or ".")
+    # Android BUILD_INFO must match the EXACT artifact stem.
+    # Example:
+    #   MeowTrail-v1.0.0.apk
+    #   -> MeowTrail-v1.0.0_BUILD_INFO.txt
+    # Never fall back to <Game>_BUILD_INFO.txt: that file can describe a
+    # different/stale build and was the cause of wrong Drive contents.
+    artifact = os.path.abspath(artifact)
+    artifact_dir = os.path.dirname(artifact) or "."
+    artifact_stem = os.path.splitext(os.path.basename(artifact))[0]
 
-    preferred = []
-    for name in (
-        info.get("PRODUCT_NAME_SAFE", ""),
-        info.get("PRODUCT_NAME", ""),
-        game_name(info),
-    ):
-        name = (name or "").strip()
-        if name:
-            preferred.append(name + "_BUILD_INFO.txt")
-            safe = safe_file_part(name)
-            if safe:
-                preferred.append(safe + "_BUILD_INFO.txt")
-
-    # Preserve order while removing duplicates.
-    seen = set()
-    preferred = [x for x in preferred if not (x in seen or seen.add(x))]
-
-    if not os.path.isdir(artifact_dir):
+    if not artifact_stem or not os.path.isdir(artifact_dir):
         return ""
 
-    for file_name in preferred:
-        candidate = os.path.join(artifact_dir, file_name)
-        if os.path.isfile(candidate):
-            return candidate
-
-    return ""
-
+    candidate = os.path.join(
+        artifact_dir,
+        artifact_stem + "_BUILD_INFO.txt",
+    )
+    return candidate if os.path.isfile(candidate) else ""
 
 def build_info_drive_name(local_path, info):
     companion = read_key_value_file(local_path)
     version = info.get("VERSION", "").strip() or companion.get("VERSION", "").strip()
     version = safe_file_part(version)
 
-    base, ext = os.path.splitext(os.path.basename(local_path))
-    ext = ext or ".txt"
-
     if not version:
         raise RuntimeError(
             "BUILD_INFO file found but VERSION is unavailable: " + local_path
         )
 
-    version_label = version if version.lower().startswith("v") else "v" + version
-    return "%s_%s%s" % (base, version_label, ext)
+    product = (
+        info.get("PRODUCT_NAME_SAFE", "").strip()
+        or safe_file_part(info.get("PRODUCT_NAME", ""))
+        or safe_file_part(game_name(info))
+        or safe_file_part(os.path.basename(local_path).split("_BUILD_INFO", 1)[0])
+        or "Game"
+    )
 
+    version_label = version if version.lower().startswith("v") else "v" + version
+    return "%s_BUILD_INFO_%s.txt" % (product, version_label)
 
 def upload(access_token, folder_id, file_path, remote_name=None, url_file=None):
     file_name = remote_name or os.path.basename(file_path)

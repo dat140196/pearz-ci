@@ -324,9 +324,11 @@ public static class JenkinsBuild
             File.WriteAllText(InfoFile, content);
 
             // Human-readable companion file used by Drive uploads.
-            // IMPORTANT: use the parent of ARTIFACT for every platform:
-            //   Android ARTIFACT is a file -> same directory as .apk / .aab
-            //   iOS ARTIFACT is Builds/iOS/<Game> -> parent is Builds/iOS
+            // It MUST be tied to the exact build artifact/export path:
+            //   Android: Builds/AndroidTest/MeowTrail-v1.0.0.apk
+            //         -> Builds/AndroidTest/MeowTrail-v1.0.0_BUILD_INFO.txt
+            //   iOS:     Builds/iOS/MeowTrail/
+            //         -> Builds/iOS/MeowTrail_BUILD_INFO.txt
             // Keep Builds/ump_build_info.txt only as Jenkins/Telegram metadata.
             string companionDirectory = Path.GetDirectoryName(artifact);
 
@@ -335,9 +337,25 @@ public static class JenkinsBuild
 
             Directory.CreateDirectory(companionDirectory);
 
+            string artifactLeaf;
+            if (Directory.Exists(artifact))
+            {
+                artifactLeaf = Path.GetFileName(
+                    artifact.TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar));
+            }
+            else
+            {
+                artifactLeaf = Path.GetFileNameWithoutExtension(artifact);
+            }
+
+            if (string.IsNullOrEmpty(artifactLeaf))
+                artifactLeaf = Sanitize(PlayerSettings.productName);
+
             string gameInfoFile = Path.Combine(
                 companionDirectory,
-                Sanitize(PlayerSettings.productName) + "_BUILD_INFO.txt");
+                artifactLeaf + "_BUILD_INFO.txt");
 
             File.WriteAllText(gameInfoFile, content);
 
