@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.0.7
+# UMP Unity Mobile Pipeline
 
 Install using Unity Package Manager -> Add package from Git URL.
 
