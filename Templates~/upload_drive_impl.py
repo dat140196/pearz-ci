@@ -8,28 +8,24 @@ Required environment variables:
     UMP_DRIVE_FOLDER_ID
 
 Destination behavior:
-    Android: <root>/<Game name>/<APK|AAB>/<artifact>
-    iOS info-only mode: <root>/<Game name>/IOS/<GameName>_BUILD_INFO.txt
+    Android: <root>/<Game name>/<APK|AAB>/<artifact + plugin BUILD_INFO>
+    iOS info-only mode: <root>/<Game name>/IOS/<plugin BUILD_INFO filename>
 
-- Missing folders are created automatically.
-- Same-name file in the same folder is UPDATED, not recreated. This keeps
-  the same Drive file id / shared link and creates a new revision.
-- Older same-name duplicates are trashed unless UMP_DRIVE_KEEP_DUPLICATES=1.
-- UMP_DRIVE_SUBPATH overrides the generated subpath; an explicitly empty
-  value uploads directly into UMP_DRIVE_FOLDER_ID.
-- Android BUILD_INFO must match the exact artifact stem, e.g.
-  MeowTrail-v1.2.3.apk -> MeowTrail-v1.2.3_BUILD_INFO.txt. It is uploaded
-  into the SAME Drive folder as the artifact. No fallback to
-  <GameName>_BUILD_INFO.txt is allowed. Its Drive name remains
-  MeowTrail_BUILD_INFO_v1.2.3.txt.
-  Rebuilding the same version updates that same Drive file/revision.
-- UMP_DRIVE_BUILD_INFO_ONLY=1 uploads exactly the supplied *_BUILD_INFO.txt
-  into <Game name>/IOS, without a version suffix and without a companion upload.
+BUILD_INFO ownership:
+- Jenkins NEVER creates, deletes, copies, edits, or overwrites game
+  *_BUILD_INFO.txt files. Those files belong to the Unity project's plugin.
+- Android first looks for <artifact-stem>_BUILD_INFO.txt beside the APK/AAB.
+  If absent, exactly one same-game *BUILD*INFO.txt may be selected.
+  Multiple matches fail rather than guessing.
+- iOS receives the exact plugin-owned BUILD_INFO path selected by Jenkins.
+- The plugin file is uploaded byte-for-byte with its original filename.
+- Same-name Drive files are UPDATED in place, preserving the Drive file id/link.
 - Artifact URL metadata is written to Builds/ump_drive_url.txt. BUILD_INFO URL
   metadata is written separately to Builds/ump_build_info_drive_url.txt.
 """
 
 import json
+import glob
 import os
 import re
 import sys
@@ -479,12 +475,9 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
-    # Android BUILD_INFO must match the EXACT artifact stem.
-    # Example:
-    #   MeowTrail-v1.0.0.apk
-    #   -> MeowTrail-v1.0.0_BUILD_INFO.txt
-    # Never fall back to <Game>_BUILD_INFO.txt: that file can describe a
-    # different/stale build and was the cause of wrong Drive contents.
+    # The Unity project plugin owns BUILD_INFO. CI must only discover it.
+    # Android output directories are cleaned before each build, so an exact
+    # artifact-stem match is authoritative and safest.
     artifact = os.path.abspath(artifact)
     artifact_dir = os.path.dirname(artifact) or "."
     artifact_stem = os.path.splitext(os.path.basename(artifact))[0]
@@ -492,32 +485,44 @@ def find_companion_build_info(artifact, info):
     if not artifact_stem or not os.path.isdir(artifact_dir):
         return ""
 
-    candidate = os.path.join(
-        artifact_dir,
-        artifact_stem + "_BUILD_INFO.txt",
-    )
-    return candidate if os.path.isfile(candidate) else ""
-
-def build_info_drive_name(local_path, info):
-    companion = read_key_value_file(local_path)
-    version = info.get("VERSION", "").strip() or companion.get("VERSION", "").strip()
-    version = safe_file_part(version)
-
-    if not version:
-        raise RuntimeError(
-            "BUILD_INFO file found but VERSION is unavailable: " + local_path
-        )
+    exact = os.path.join(artifact_dir, artifact_stem + "_BUILD_INFO.txt")
+    if os.path.isfile(exact):
+        return exact
 
     product = (
         info.get("PRODUCT_NAME_SAFE", "").strip()
         or safe_file_part(info.get("PRODUCT_NAME", ""))
         or safe_file_part(game_name(info))
-        or safe_file_part(os.path.basename(local_path).split("_BUILD_INFO", 1)[0])
-        or "Game"
     )
 
-    version_label = version if version.lower().startswith("v") else "v" + version
-    return "%s_BUILD_INFO_%s.txt" % (product, version_label)
+    patterns = []
+    if product:
+        patterns.extend([
+            os.path.join(artifact_dir, product + "*_BUILD_INFO.txt"),
+            os.path.join(artifact_dir, product + "*BUILD*INFO.txt"),
+        ])
+
+    matches = []
+    for pattern in patterns:
+        for candidate in glob.glob(pattern):
+            if not os.path.isfile(candidate):
+                continue
+            if os.path.basename(candidate).startswith("ump_"):
+                continue
+            if candidate not in matches:
+                matches.append(candidate)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        raise RuntimeError(
+            "Multiple plugin BUILD_INFO files match artifact %s: %s"
+            % (artifact, ", ".join(sorted(matches)))
+        )
+
+    return ""
+
 
 def upload(access_token, folder_id, file_path, remote_name=None, url_file=None):
     file_name = remote_name or os.path.basename(file_path)
@@ -614,22 +619,21 @@ def main():
 
     companion = find_companion_build_info(artifact, info_values)
     if companion:
-        drive_name = build_info_drive_name(companion, info_values)
-        log("Companion BUILD_INFO found: " + companion)
-        log("Companion Drive name: " + drive_name)
-        log("Companion destination: same Drive folder as artifact")
+        log("Plugin BUILD_INFO found: " + companion)
+        log("Plugin BUILD_INFO contents: untouched")
+        log("Plugin BUILD_INFO filename: preserved")
+        log("Plugin BUILD_INFO destination: same Drive folder as artifact")
         upload(
             access_token,
             target_folder,
             companion,
-            remote_name=drive_name,
             url_file=os.environ.get(
                 "UMP_BUILD_INFO_DRIVE_URL_FILE",
                 "Builds/ump_build_info_drive_url.txt",
             ),
         )
     else:
-        log("Companion BUILD_INFO: not found - skipped (optional).")
+        log("Plugin BUILD_INFO: not found - skipped (optional).")
 
 
 if __name__ == "__main__":

@@ -236,8 +236,9 @@ pipeline {
                                 Builds/ump_drive_url.txt \
                                 Builds/ump_build_info_drive_url.txt \
                                 Builds/ump_build_info.txt
-                            find Builds -maxdepth 1 -type f \
-                                -name '*_BUILD_INFO.txt' -delete 2>/dev/null || true
+
+                            # Never delete or rewrite *_BUILD_INFO.txt here.
+                            # Those files are owned by the Unity project plugin.
                         '''
                     }
                 }
@@ -548,8 +549,9 @@ pipeline {
         // GOOGLE DRIVE UPLOAD
         // ====================================================
 
-        // Android uploads its artifact (+ optional versioned BUILD_INFO).
-        // iOS uploads only the stable <GameName>_BUILD_INFO.txt into IOS/.
+        // Android uploads its artifact plus the plugin-owned BUILD_INFO file.
+        // iOS uploads only the plugin-owned BUILD_INFO file into IOS/.
+        // Jenkins never creates/rewrites a game *_BUILD_INFO.txt.
 
         stage('Drive Upload') {
             when {
@@ -599,7 +601,7 @@ pipeline {
                     // ------------------------------------------------
                     // iOS: Drive receives BUILD_INFO only.
                     // No .app / .ipa is uploaded here. Both iOS branches
-                    // overwrite the stable <GameName>_BUILD_INFO.txt in:
+                    // upload only the project plugin-owned BUILD_INFO file into:
                     //   <Drive root>/<Game name>/IOS/
                     // ------------------------------------------------
                     if (env.BRANCH_NAME == 'release/ios-test' ||
@@ -625,18 +627,36 @@ pipeline {
                                 fi
 
                                 IOS_ROOT="$(dirname "$EXPORT_DIR")"
-                                TARGET="${IOS_ROOT}/${SAFE}_BUILD_INFO.txt"
+                                EXACT="${IOS_ROOT}/${SAFE}_BUILD_INFO.txt"
 
-                                # iOS BUILD_INFO sits beside the game Xcode export
-                                # directory under Builds/iOS. Never synthesize/copy a
-                                # fallback from Builds/ump_build_info.txt because
-                                # that can upload metadata from the wrong location.
-                                if [ ! -f "$TARGET" ]; then
-                                    echo "[PEARZ] ERROR: iOS BUILD_INFO not found: $TARGET" >&2
-                                    exit 1
+                                # The project plugin owns BUILD_INFO. Prefer the
+                                # stable iOS name first, then allow exactly one
+                                # plugin-generated variant such as:
+                                #   <Game>_<anything>_BUILD_INFO.txt
+                                # CI never creates, copies, edits, or deletes it.
+                                if [ -f "$EXACT" ]; then
+                                    printf '%s\n' "$EXACT"
+                                    exit 0
                                 fi
 
-                                printf '%s\n' "$TARGET"
+                                MATCHES="$(find "$IOS_ROOT" -maxdepth 1 -type f \
+                                    \( -name "${SAFE}*_BUILD_INFO.txt" -o -name "${SAFE}*BUILD*INFO.txt" \) \
+                                    ! -name 'ump_*' -print 2>/dev/null || true)"
+
+                                COUNT="$(printf '%s\n' "$MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+                                if [ "$COUNT" = "1" ]; then
+                                    printf '%s\n' "$MATCHES"
+                                    exit 0
+                                fi
+
+                                if [ "$COUNT" = "0" ]; then
+                                    echo "[PEARZ] ERROR: plugin BUILD_INFO not found in $IOS_ROOT" >&2
+                                else
+                                    echo "[PEARZ] ERROR: multiple plugin BUILD_INFO files found in $IOS_ROOT" >&2
+                                    printf '%s\n' "$MATCHES" >&2
+                                fi
+                                exit 1
                             ''',
                             returnStdout: true
                         ).trim()
@@ -648,7 +668,7 @@ pipeline {
                         echo "[PEARZ] File: ${uploadFile}"
                         if (buildInfoOnly) {
                             echo '[PEARZ] Mode: iOS BUILD_INFO only'
-                            echo '[PEARZ] Drive: <Game name>/IOS/<GameName>_BUILD_INFO.txt'
+                            echo '[PEARZ] Drive: <Game name>/IOS/<plugin BUILD_INFO filename>'
                         }
                         echo '========================================'
 

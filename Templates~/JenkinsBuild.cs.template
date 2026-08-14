@@ -11,8 +11,9 @@ using UnityEditor.iOS.Xcode;
 
 public static class JenkinsBuild
 {
-    // Jenkins metadata used by shell scripts. A separate human-readable
-    // BUILD_INFO file is written into the platform output root.
+    // Jenkins-private metadata used by shell scripts and Telegram.
+    // IMPORTANT: Jenkins never creates/overwrites the game's *_BUILD_INFO.txt.
+    // Those files belong to the build-info plugin inside each Unity project.
     private const string InfoFile = "Builds/ump_build_info.txt";
 
     public static void BuildAndroidAab() => BuildAndroid("Builds/Android", ".aab", true);
@@ -39,7 +40,7 @@ public static class JenkinsBuild
 
         Check(BuildPipeline.BuildPlayer(options));
 
-        WriteBuildInfo(output);
+        WriteJenkinsMetadata(output);
 
         UnityEngine.Debug.Log("[UMP] Android build: " + output);
     }
@@ -111,7 +112,7 @@ public static class JenkinsBuild
         // the IAP capability is removed for the device build.
         RemoveStoreKitFromDeviceAppTarget(output);
 
-        WriteBuildInfo(output);
+        WriteJenkinsMetadata(output);
 
         UnityEngine.Debug.Log("[UMP] iOS Xcode project: " + output);
     }
@@ -304,7 +305,7 @@ public static class JenkinsBuild
         return PlayerSettings.GetApplicationIdentifier(group);
     }
 
-    private static void WriteBuildInfo(string artifact)
+    private static void WriteJenkinsMetadata(string artifact)
     {
         try
         {
@@ -320,51 +321,17 @@ public static class JenkinsBuild
                 "ARTIFACT=" + artifact
             };
 
-            string content = string.Join("\n", lines) + "\n";
-            File.WriteAllText(InfoFile, content);
+            File.WriteAllText(InfoFile, string.Join("\n", lines) + "\n");
 
-            // Human-readable companion file used by Drive uploads.
-            // It MUST be tied to the exact build artifact/export path:
-            //   Android: Builds/AndroidTest/MeowTrail-v1.0.0.apk
-            //         -> Builds/AndroidTest/MeowTrail-v1.0.0_BUILD_INFO.txt
-            //   iOS:     Builds/iOS/MeowTrail/
-            //         -> Builds/iOS/MeowTrail_BUILD_INFO.txt
-            // Keep Builds/ump_build_info.txt only as Jenkins/Telegram metadata.
-            string companionDirectory = Path.GetDirectoryName(artifact);
-
-            if (string.IsNullOrEmpty(companionDirectory))
-                companionDirectory = "Builds";
-
-            Directory.CreateDirectory(companionDirectory);
-
-            string artifactLeaf;
-            if (Directory.Exists(artifact))
-            {
-                artifactLeaf = Path.GetFileName(
-                    artifact.TrimEnd(
-                        Path.DirectorySeparatorChar,
-                        Path.AltDirectorySeparatorChar));
-            }
-            else
-            {
-                artifactLeaf = Path.GetFileNameWithoutExtension(artifact);
-            }
-
-            if (string.IsNullOrEmpty(artifactLeaf))
-                artifactLeaf = Sanitize(PlayerSettings.productName);
-
-            string gameInfoFile = Path.Combine(
-                companionDirectory,
-                artifactLeaf + "_BUILD_INFO.txt");
-
-            File.WriteAllText(gameInfoFile, content);
-
-            UnityEngine.Debug.Log("[UMP] Build info: " + InfoFile);
-            UnityEngine.Debug.Log("[UMP] Game build info: " + gameInfoFile);
+            // Do NOT touch any *_BUILD_INFO.txt here. The Unity project's
+            // own build-info plugin creates that file during the build. CI
+            // only discovers and uploads the plugin-owned file afterwards.
+            UnityEngine.Debug.Log("[UMP] Jenkins metadata: " + InfoFile);
         }
         catch (Exception ex)
         {
-            UnityEngine.Debug.LogWarning("[UMP] Cannot write build info: " + ex.Message);
+            UnityEngine.Debug.LogWarning(
+                "[UMP] Cannot write Jenkins metadata: " + ex.Message);
         }
     }
 

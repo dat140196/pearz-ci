@@ -7,7 +7,7 @@ Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google D
 Install with Unity Package Manager using **Add package from Git URL**:
 
 ```text
-https://github.com/dat140196/pearz-ci.git#1.0.9
+https://github.com/dat140196/pearz-ci.git#1.0.10
 ```
 
 Pin the package version/tag in `Packages/manifest.json` so Unity does not have to follow a moving Git revision on every build:
@@ -15,7 +15,7 @@ Pin the package version/tag in `Packages/manifest.json` so Unity does not have t
 ```json
 {
   "dependencies": {
-    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.9"
+    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.10"
   }
 }
 ```
@@ -103,15 +103,15 @@ Android keeps the artifact behavior:
 <UMP_DRIVE_FOLDER_ID>/<Game name>/<AAB|APK>/<artifact>
 ```
 
-When `<GameName>_BUILD_INFO.txt` exists, Android also uploads a versioned companion BUILD_INFO into the same AAB/APK folder. Rebuilding the same version updates the same Drive file/revision.
+Android also uploads the BUILD_INFO file produced by the Unity project's own build-info plugin from the same local directory as the APK/AAB. CI preserves the plugin filename and file contents exactly.
 
-iOS intentionally uploads **no `.app` and no `.ipa` to Drive**. Both `release/ios-test` and `release/ios` upload only:
+iOS intentionally uploads **no `.app` and no `.ipa` to Drive**. Both `release/ios-test` and `release/ios` upload only the plugin-owned BUILD_INFO file found in `Builds/iOS/` into:
 
 ```text
-<UMP_DRIVE_FOLDER_ID>/<Game name>/IOS/<GameName>_BUILD_INFO.txt
+<UMP_DRIVE_FOLDER_ID>/<Game name>/IOS/<plugin BUILD_INFO filename>
 ```
 
-The iOS BUILD_INFO name is stable (no version suffix). A later iOS build updates the same Drive file so the file ID/share link stays stable.
+If a same-name file already exists on Drive, it is updated in place so the Drive file ID/share link stays stable.
 
 The uploader preserves the existing behavior:
 
@@ -338,20 +338,38 @@ When upgrading UMP:
 ## Current version
 
 ```text
-UMP 1.0.9
+UMP 1.0.10
 ```
 
-The package version is `1.0.9`. Tag the release as `1.0.9` and point Unity projects to `#1.0.9`.
+The package version is `1.0.10`. Tag the release as `1.0.10` and point Unity projects to `#1.0.10`.
 
 
-## BUILD_INFO location (1.0.9 path fix)
+## BUILD_INFO source rule (1.0.10)
 
-The human-readable `<GameName>_BUILD_INFO.txt` is written in the platform output root:
+Pearz CI does **not** generate a game BUILD_INFO file. The Unity project plugin generates it during the build and CI only discovers/uploads that existing file.
+
+Expected local locations:
 
 ```text
-Android AAB : Builds/Android/<GameName>_BUILD_INFO.txt
-Android APK : Builds/AndroidTest/<GameName>_BUILD_INFO.txt
-iOS         : Builds/iOS/<GameName>_BUILD_INFO.txt
+Android AAB : same directory as the .aab
+Android APK : same directory as the .apk
+iOS         : Builds/iOS/ (beside the <Game>/ Xcode export directory)
 ```
 
-`Builds/ump_build_info.txt` is Jenkins/Telegram metadata only and is never used as a Drive BUILD_INFO fallback.
+Android prefers an exact artifact-stem match, for example:
+
+```text
+Builds/AndroidTest/MeowTrail-v1.0.0.apk
+Builds/AndroidTest/MeowTrail-v1.0.0_BUILD_INFO.txt
+
+Builds/Android/MeowTrail-v1.0.0.aab
+Builds/Android/MeowTrail-v1.0.0_BUILD_INFO.txt
+```
+
+`Builds/ump_build_info.txt` is Jenkins-private metadata only. It is never copied into, or used to overwrite, the project plugin's BUILD_INFO file.
+
+## BUILD_INFO ownership (1.0.10)
+
+Game `*_BUILD_INFO.txt` files are owned entirely by the Unity project's own build-info plugin. Pearz CI never creates, copies, deletes, edits, or overwrites those files. `Builds/ump_build_info.txt` is Jenkins-private metadata only.
+
+Android Drive upload discovers the plugin file beside the APK/AAB, preferring the exact artifact stem (`<artifact-stem>_BUILD_INFO.txt`). iOS Drive upload reads the plugin file from `Builds/iOS/` beside the game Xcode export directory. The plugin file is uploaded byte-for-byte with its original filename.
