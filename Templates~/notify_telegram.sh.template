@@ -2,489 +2,277 @@
 set -euo pipefail
 
 # ============================================================
-# PEARZ / UMP - Telegram build notification
+# PEARZ Telegram build notification.
 #
-# Posts the build result into a topic named after the game, and
-# creates that topic the first time the game is built.
+# Required Jenkins secret text credentials:
+#   UMP_TELEGRAM_BOT_TOKEN
+#   UMP_TELEGRAM_CHAT_ID
 #
-# Jenkins credentials (Secret text):
-#   UMP_TELEGRAM_BOT_TOKEN   from @BotFather
-#   UMP_TELEGRAM_CHAT_ID     the group, e.g. -1001234567890
+# Optional:
+#   UMP_BUILD_STATUS
+#   UMP_ARTIFACT
+#   UMP_GAME_NAME
+#   UMP_TELEGRAM_TOPIC_ID
+#   UMP_TELEGRAM_TOPICS="Game A=123;Game B=456"
+#   UMP_TELEGRAM_AUTO_TOPIC=0
+#   UMP_TELEGRAM_DRY_RUN=1
 #
-# Optional (global environment variables):
-#   UMP_GAME_NAME            override the game name
-#   UMP_TELEGRAM_AUTO_TOPIC=0    never create a topic
-#   UMP_TELEGRAM_TOPIC_ID    pin every build to one topic
-#   UMP_TELEGRAM_TOPICS      "MeowPuzzle=2;Sandshooter=7" -
-#                            topics created by hand, these win
-#   UMP_TELEGRAM_TOPIC_STATE where the created topic ids are
-#                            remembered (default
-#                            ~/.pearz/telegram-topics)
-#
-# The bot must be an administrator of the group with the
-# "Manage topics" right, and the group must have Topics on.
-# Without that the message still goes to the group, unthreaded.
+# Build metadata:
+#   Builds/ump_build_info.txt
+#   Builds/ump_drive_url.txt
+#   Builds/ump_build_info_drive_url.txt
 # ============================================================
+
+INFO_FILE="${UMP_BUILD_INFO:-Builds/ump_build_info.txt}"
+DRIVE_URL_FILE="${UMP_DRIVE_URL_FILE:-Builds/ump_drive_url.txt}"
+BUILD_INFO_URL_FILE="${UMP_BUILD_INFO_DRIVE_URL_FILE:-Builds/ump_build_info_drive_url.txt}"
+STATUS="${UMP_BUILD_STATUS:-${BUILD_STATUS:-UNKNOWN}}"
+ARTIFACT="${UMP_ARTIFACT:-}"
+BRANCH="${BRANCH_NAME:-}"
+BUILD_NO="${BUILD_NUMBER:-}"
+JENKINS_URL="${BUILD_URL:-}"
+
+read_kv() {
+    local file="$1"
+    local key="$2"
+    [ -f "$file" ] || return 0
+    awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$file" \
+        | tr -d '\r'
+}
+
+PRODUCT_NAME="$(read_kv "$INFO_FILE" PRODUCT_NAME)"
+VERSION="$(read_kv "$INFO_FILE" VERSION)"
+BUILD_VERSION="$(read_kv "$INFO_FILE" BUILD_NUMBER)"
+PACKAGE_NAME="$(read_kv "$INFO_FILE" PACKAGE_NAME)"
+DRIVE_URL="$(read_kv "$DRIVE_URL_FILE" url)"
+BUILD_INFO_URL="$(read_kv "$BUILD_INFO_URL_FILE" url)"
+
+GAME="${UMP_GAME_NAME:-$PRODUCT_NAME}"
+if [ -z "$GAME" ]; then
+    GAME="${JOB_NAME%%/*}"
+fi
+[ -n "$GAME" ] || GAME="Game"
+
+case "$STATUS" in
+    SUCCESS) ICON="✅" ;;
+    UNSTABLE) ICON="⚠️" ;;
+    ABORTED) ICON="⏹️" ;;
+    NOT_BUILT) ICON="⏭️" ;;
+    *) ICON="❌" ;;
+esac
+
+MESSAGE="$ICON $GAME - $STATUS"
+append_line() {
+    MESSAGE="${MESSAGE}"$'\n'"$1"
+}
+
+[ -n "$BRANCH" ] && append_line "Branch: $BRANCH"
+[ -n "$BUILD_NO" ] && append_line "Build: #$BUILD_NO"
+
+if [ -n "$VERSION" ] && [ -n "$BUILD_VERSION" ]; then
+    append_line "Version: $VERSION ($BUILD_VERSION)"
+elif [ -n "$VERSION" ]; then
+    append_line "Version: $VERSION"
+fi
+
+[ -n "$PACKAGE_NAME" ] && append_line "Package: $PACKAGE_NAME"
+
+if [ -n "$ARTIFACT" ]; then
+    append_line "Artifact: $(basename "$ARTIFACT")"
+fi
+
+[ -n "$DRIVE_URL" ] && append_line "Drive: $DRIVE_URL"
+[ -n "$BUILD_INFO_URL" ] && append_line "Build Info: $BUILD_INFO_URL"
+[ -n "$JENKINS_URL" ] && append_line "Jenkins: $JENKINS_URL"
+
+if [ "${UMP_TELEGRAM_DRY_RUN:-0}" = "1" ]; then
+    echo "========================================"
+    echo "[PEARZ] Telegram dry run"
+    printf '%s\n' "$MESSAGE"
+    echo "========================================"
+    exit 0
+fi
 
 TOKEN="${UMP_TELEGRAM_BOT_TOKEN:-}"
 CHAT_ID="${UMP_TELEGRAM_CHAT_ID:-}"
 
 if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
-    echo "[PEARZ] Telegram disabled: set UMP_TELEGRAM_BOT_TOKEN and UMP_TELEGRAM_CHAT_ID."
-    exit 0
+    echo "[PEARZ] ERROR: Telegram bot token/chat id is missing."
+    exit 1
 fi
 
-# A credential pasted with a trailing newline or wrapped in
-# quotes is a silent "chat not found" otherwise.
-TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]\$//")"
-CHAT_ID="$(printf '%s' "$CHAT_ID" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]\$//")"
+API="https://api.telegram.org/bot${TOKEN}"
 
-STATUS="${UMP_BUILD_STATUS:-UNKNOWN}"
-BRANCH="${BRANCH_NAME:-unknown}"
-JOB="${JOB_NAME:-unknown}"
-BUILD="${BUILD_NUMBER:-unknown}"
-URL="${BUILD_URL:-}"
-ARTIFACT="${UMP_ARTIFACT:-}"
-
-# ------------------------------------------------------------
-# Game name
-#
-# JOB_NAME is "MeowPuzzle/release%2Fandroid" on a multibranch
-# job, which reads badly in a chat and makes an ugly topic.
-# Player Settings knows the real name.
-# ------------------------------------------------------------
-
-GAME="${UMP_GAME_NAME:-}"
-
-# Unity writes this next to the artifact at the end of the build:
-#   PRODUCT_NAME=, VERSION=, BUILD_NUMBER=, ARTIFACT=
-INFO_FILE="${UMP_BUILD_INFO:-Builds/ump_build_info.txt}"
-
-info_value() {
-
-    [ -f "$INFO_FILE" ] || return 0
-
-    awk -F'=' -v key="$1" \
-        '$1 == key { sub(/^[^=]*=/, ""); print; exit }' \
-        "$INFO_FILE" 2>/dev/null | tr -d '\r' || true
+json_result_field() {
+    local field="$1"
+    ruby -rjson -e '
+        field = ARGV.fetch(0)
+        begin
+          json = JSON.parse(STDIN.read)
+          value = json.dig("result", field)
+          print(value.to_s) unless value.nil?
+        rescue StandardError
+        end
+    ' "$field"
 }
 
-[ -n "$GAME" ] || GAME="$(info_value PRODUCT_NAME)"
+BOT_JSON="$(curl -fsS --max-time 20 "$API/getMe" 2>/dev/null || true)"
+BOT_USER="$(printf '%s' "$BOT_JSON" | json_result_field username)"
+[ -n "$BOT_USER" ] && echo "[PEARZ] Telegram bot: @$BOT_USER"
 
-if [ -z "$GAME" ] && [ -f "${WORKSPACE:-}/ProjectSettings/ProjectSettings.asset" ]; then
-
-    GAME="$(sed -n 's/^  productName: //p' \
-        "$WORKSPACE/ProjectSettings/ProjectSettings.asset" 2>/dev/null \
-        | head -n 1 \
-        | tr -d '\r' || true)"
-fi
-
-# "MeowPuzzle/release%2Fandroid" -> "MeowPuzzle"
-[ -n "$GAME" ] || GAME="${JOB%%/*}"
-
-VERSION="$(info_value VERSION)"
-VERSION_CODE="$(info_value BUILD_NUMBER)"
-
-# ------------------------------------------------------------
-# Google Drive link
-#
-# upload_drive_impl.py leaves it in the workspace. The workspace
-# is kept between builds, so the artifact name it was written
-# for has to match this build's artifact.
-# ------------------------------------------------------------
-
-DRIVE_FILE="${UMP_DRIVE_URL_FILE:-Builds/ump_drive_url.txt}"
-DRIVE_URL=""
-
-if [ -f "$DRIVE_FILE" ] && [ -n "$ARTIFACT" ]; then
-
-    DRIVE_FOR="$(awk -F'=' '$1 == "artifact" { sub(/^[^=]*=/, ""); print; exit }' \
-        "$DRIVE_FILE" 2>/dev/null | tr -d '\r' || true)"
-
-    if [ "$DRIVE_FOR" = "$(basename "$ARTIFACT")" ]; then
-
-        DRIVE_URL="$(awk -F'=' '$1 == "url" { sub(/^[^=]*=/, ""); print; exit }' \
-            "$DRIVE_FILE" 2>/dev/null | tr -d '\r' || true)"
-    fi
-fi
-
-# ------------------------------------------------------------
-# Telegram helpers
-# ------------------------------------------------------------
-
-# No -f: a 400 carries the reason in its body, which is the
-# only way to tell "not a forum" from "topic deleted".
-tg_api() {
-
-    local method="$1"
-    shift
-
-    curl -sS -X POST \
-        "https://api.telegram.org/bot${TOKEN}/${method}" \
-        "$@" 2>/dev/null || true
-}
-
-tg_ok() {
-    echo "$1" | grep -q '"ok":true'
-}
-
-tg_error() {
-
-    echo "$1" \
-        | sed -n 's/.*"description":"\([^"]*\)".*/\1/p' \
-        | head -n 1
-}
-
-# ------------------------------------------------------------
-# Preflight
-#
-# "chat not found" is the usual setup mistake and says nothing
-# about which of the two credentials is wrong. Jenkins masks the
-# chat id in the log, so its shape is printed instead of the
-# value - enough to see a missing "-100" or a stray character.
-# ------------------------------------------------------------
-
-BOT_INFO="$(tg_api getMe)"
-BOT_NAME=""
-
-if tg_ok "$BOT_INFO"; then
-
-    BOT_NAME="$(echo "$BOT_INFO" \
-        | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -n 1)"
-
-    echo "[PEARZ] Telegram bot: @$BOT_NAME"
-
+CHAT_JSON="$(curl -fsS --max-time 20 \
+    --get --data-urlencode "chat_id=$CHAT_ID" \
+    "$API/getChat" 2>/dev/null || true)"
+CHAT_TITLE="$(printf '%s' "$CHAT_JSON" | json_result_field title)"
+if [ -n "$CHAT_TITLE" ]; then
+    echo "[PEARZ] Telegram chat: $CHAT_TITLE"
 else
-
-    echo "[PEARZ] Telegram token rejected: $(tg_error "$BOT_INFO")"
-    echo "[PEARZ] Check the UMP_TELEGRAM_BOT_TOKEN credential."
-
-    exit 0
+    echo "[PEARZ] Telegram chat: $CHAT_ID"
 fi
 
-CHAT_INFO="$(tg_api getChat --data-urlencode "chat_id=${CHAT_ID}")"
-
-if tg_ok "$CHAT_INFO"; then
-
-    echo "[PEARZ] Telegram chat: $(echo "$CHAT_INFO" \
-        | sed -n 's/.*"title":"\([^"]*\)".*/\1/p' | head -n 1)"
-
-    if ! echo "$CHAT_INFO" | grep -q '"is_forum":true'; then
-
-        IS_FORUM=0
-    else
-        IS_FORUM=1
-    fi
-
-else
-
-    echo "[PEARZ] Telegram chat unusable: $(tg_error "$CHAT_INFO")"
-    echo "[PEARZ] UMP_TELEGRAM_CHAT_ID has the shape" \
-        "$(printf '%s' "$CHAT_ID" | sed 's/[0-9]/#/g')" \
-        "(${#CHAT_ID} characters)."
-
-    # The bot's own view of the world settles it: whatever it has
-    # been talking to is listed with the id to use. Never build an
-    # id by hand - a "-100" glued in front of a small group id
-    # looks perfectly valid and is not a chat.
-    UPDATES="$(tg_api getUpdates)"
-
-    CHATS="$(echo "$UPDATES" \
-        | tr '{' '\n' \
-        | sed -n 's/.*"id":\(-\{0,1\}[0-9]\{1,\}\),"title":"\([^"]*\)","type":"\([^"]*\)".*/\1  \3  \2/p' \
-        | sort -u || true)"
-
-    if [ -n "$CHATS" ]; then
-
-        echo "[PEARZ] Groups @$BOT_NAME can actually see:"
-        echo "$CHATS" | sed 's/^/[PEARZ]   /'
-        echo "[PEARZ] Copy that id into UMP_TELEGRAM_CHAT_ID as it is."
-
-    else
-
-        echo "[PEARZ] @$BOT_NAME has received nothing from any group."
-        echo "[PEARZ] Check that this bot - not another one - is in the"
-        echo "[PEARZ] group, then post /start@$BOT_NAME there and read"
-        echo "[PEARZ] https://api.telegram.org/bot<token>/getUpdates"
-        echo "[PEARZ] The id changes when a group becomes a supergroup."
-    fi
-
-    exit 0
-fi
-
-# ------------------------------------------------------------
-# Topic of a forum group
-#
-# The Bot API cannot list the topics of a group, so the ids of
-# the ones this bot created are kept on the build machine. The
-# file survives workspace wipes; delete it to start over.
-# ------------------------------------------------------------
-
-TOPIC_STATE="${UMP_TELEGRAM_TOPIC_STATE:-$HOME/.pearz/telegram-topics}"
-
-topic_remembered() {
-
-    [ -f "$TOPIC_STATE" ] || return 0
-
-    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
-        '$1 == chat && $2 == game { print $3; exit }' \
-        "$TOPIC_STATE" 2>/dev/null || true
+truthy() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-topic_remember() {
-
-    local id="$1"
-
-    mkdir -p "$(dirname "$TOPIC_STATE")"
-    touch "$TOPIC_STATE"
-
-    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
-        '!($1 == chat && $2 == game)' \
-        "$TOPIC_STATE" > "$TOPIC_STATE.tmp" 2>/dev/null || true
-
-    mv "$TOPIC_STATE.tmp" "$TOPIC_STATE" 2>/dev/null || true
-
-    printf '%s\t%s\t%s\n' "$CHAT_ID" "$GAME" "$id" >> "$TOPIC_STATE"
+safe_name() {
+    printf '%s' "$1" \
+        | tr ' /:' '___' \
+        | tr -cd '[:alnum:]_.-'
 }
 
-topic_forget() {
-
-    [ -f "$TOPIC_STATE" ] || return 0
-
-    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
-        '!($1 == chat && $2 == game)' \
-        "$TOPIC_STATE" > "$TOPIC_STATE.tmp" 2>/dev/null || true
-
-    mv "$TOPIC_STATE.tmp" "$TOPIC_STATE" 2>/dev/null || true
-}
-
-# One of the six colours Telegram accepts, picked from the name
-# so a game keeps the same icon everywhere.
-topic_color() {
-
-    local colors=(7322096 16766590 13338331 9367192 16749490 16478047)
-    local index
-
-    index=$(( $(printf '%s' "$GAME" | cksum | cut -d' ' -f1) % 6 ))
-
-    echo "${colors[$index]}"
-}
-
-topic_create() {
-
-    local response
+mapped_topic() {
+    local mappings="${UMP_TELEGRAM_TOPICS:-}"
+    local pair
+    local name
     local id
+    [ -n "$mappings" ] || return 0
 
-    response="$(tg_api createForumTopic \
-        --data-urlencode "chat_id=${CHAT_ID}" \
-        --data-urlencode "name=${GAME}" \
-        --data-urlencode "icon_color=$(topic_color)")"
+    while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        name="${pair%%=*}"
+        id="${pair#*=}"
+        if [ "$name" = "$GAME" ] && printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            printf '%s' "$id"
+            return 0
+        fi
+    done < <(printf '%s' "$mappings" | tr ';' '\n')
+}
 
-    if ! tg_ok "$response"; then
+cached_topic() {
+    local root="${UMP_TELEGRAM_TOPIC_CACHE:-$HOME/.pearz/telegram-topics}"
+    local safe
+    local lower
+    local candidate
+    local id
+    safe="$(safe_name "$GAME")"
+    lower="$(printf '%s' "$safe" | tr '[:upper:]' '[:lower:]')"
 
-        echo "[PEARZ] Cannot create the topic '$GAME': $(tg_error "$response")" >&2
-        echo "[PEARZ] Turn Topics on for the group and make the bot an" >&2
-        echo "[PEARZ] admin with 'Manage topics'. Posting to the group" >&2
-        echo "[PEARZ] itself for now." >&2
-
+    if [ -f "$root" ]; then
+        id="$(grep -F "$GAME" "$root" 2>/dev/null \
+            | grep -Eo '[0-9]+' | tail -n 1 || true)"
+        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            printf '%s' "$id"
+            return 0
+        fi
         return 0
     fi
 
-    id="$(echo "$response" \
-        | sed -n 's/.*"message_thread_id":\([0-9]*\).*/\1/p' \
-        | head -n 1)"
+    [ -d "$root" ] || return 0
 
-    [ -n "$id" ] || return 0
-
-    topic_remember "$id"
-
-    echo "$id"
-}
-
-AUTO_TOPIC="${UMP_TELEGRAM_AUTO_TOPIC:-1}"
-
-# 1. One topic for everything.
-THREAD="${UMP_TELEGRAM_TOPIC_ID:-}"
-
-# 2. Topics created by hand, "<game>=<topic id>" pairs.
-if [ -z "$THREAD" ] && [ -n "${UMP_TELEGRAM_TOPICS:-}" ]; then
-
-    OLD_IFS="$IFS"
-    IFS=';'
-
-    for pair in $UMP_TELEGRAM_TOPICS; do
-
-        key="$(echo "${pair%%=*}" | sed 's/^ *//; s/ *$//')"
-        value="$(echo "${pair#*=}" | tr -d ' \r')"
-
-        [ "$key" = "$GAME" ] && THREAD="$value"
+    for candidate in \
+        "$root/$safe" \
+        "$root/$safe.txt" \
+        "$root/$safe.topic" \
+        "$root/$lower" \
+        "$root/$lower.txt" \
+        "$root/$lower.topic" \
+        "$root/${CHAT_ID}_${safe}" \
+        "$root/${CHAT_ID}_${safe}.txt"; do
+        [ -f "$candidate" ] || continue
+        id="$(grep -Eo '[0-9]+' "$candidate" 2>/dev/null | tail -n 1 || true)"
+        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            printf '%s' "$id"
+            return 0
+        fi
     done
 
-    IFS="$OLD_IFS"
-fi
-
-if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ] && [ "$IS_FORUM" = "0" ]; then
-
-    echo "[PEARZ] Topics are off for this group, posting to the group."
-    echo "[PEARZ] Group Settings > Topics turns them on."
-fi
-
-# 3. The topic this bot created for the game earlier, or a new one.
-if [ -z "$THREAD" ] && [ "$AUTO_TOPIC" != "0" ] && [ "$IS_FORUM" = "1" ]; then
-
-    THREAD="$(topic_remembered)"
-
-    if [ -n "$THREAD" ]; then
-
-        echo "[PEARZ] Telegram topic '$GAME': $THREAD"
-
-    else
-
-        THREAD="$(topic_create)"
-
-        [ -n "$THREAD" ] &&
-            echo "[PEARZ] Telegram topic '$GAME' created: $THREAD"
-    fi
-fi
-
-# ------------------------------------------------------------
-# Message
-# ------------------------------------------------------------
-
-ICON="⚠️"
-
-if [ "$STATUS" = "SUCCESS" ]; then
-    ICON="✅"
-fi
-
-if [ "$STATUS" = "FAILURE" ]; then
-    ICON="❌"
-fi
-
-# A real newline: "\n" in the body is sent to Telegram as two
-# characters and shows up as "\n" in the message.
-NL="
-"
-
-TEXT="${ICON} ${GAME} - ${STATUS}"
-TEXT="${TEXT}${NL}Branch: ${BRANCH}"
-TEXT="${TEXT}${NL}Build: #${BUILD}"
-
-if [ -n "$VERSION" ]; then
-
-    if [ -n "$VERSION_CODE" ]; then
-        TEXT="${TEXT}${NL}Version: ${VERSION} (${VERSION_CODE})"
-    else
-        TEXT="${TEXT}${NL}Version: ${VERSION}"
-    fi
-fi
-
-if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
-    TEXT="${TEXT}${NL}Artifact: $(basename "$ARTIFACT")"
-fi
-
-if [ -n "$DRIVE_URL" ]; then
-    TEXT="${TEXT}${NL}Drive: ${DRIVE_URL}"
-fi
-
-if [ -n "$URL" ]; then
-    TEXT="${TEXT}${NL}Jenkins: ${URL}"
-fi
-
-send_message() {
-
-    local args=(
-        --data-urlencode "chat_id=${CHAT_ID}"
-        --data-urlencode "text=${TEXT}"
-    )
-
-    [ -n "$THREAD" ] && args+=(--data-urlencode "message_thread_id=${THREAD}")
-
-    tg_api sendMessage "${args[@]}"
+    # Compatibility fallback for older cache layouts that stored the game
+    # name inside a file rather than in its filename.
+    while IFS= read -r candidate; do
+        [ -f "$candidate" ] || continue
+        if grep -Fq "$GAME" "$candidate" 2>/dev/null; then
+            id="$(grep -Eo '[0-9]+' "$candidate" 2>/dev/null | tail -n 1 || true)"
+            if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+                printf '%s' "$id"
+                return 0
+            fi
+        fi
+    done < <(find "$root" -maxdepth 2 -type f 2>/dev/null | head -n 100)
 }
 
-RESPONSE="$(send_message)"
+store_topic() {
+    local id="$1"
+    local root="${UMP_TELEGRAM_TOPIC_CACHE:-$HOME/.pearz/telegram-topics}"
+    local safe
+    safe="$(safe_name "$GAME")"
 
-# The topic can be closed or deleted between two builds, and the
-# remembered id then points at nothing. Reopen it, or make a new
-# one - never lose the notification over it.
-if ! tg_ok "$RESPONSE" && [ -n "$THREAD" ]; then
-
-    DESCRIPTION="$(tg_error "$RESPONSE")"
-
-    echo "[PEARZ] Telegram topic $THREAD refused: $DESCRIPTION"
-
-    # Only a broken topic is worth forgetting. A bad token or a
-    # wrong chat id says nothing about the topic, and dropping
-    # the id there would make a duplicate topic on every build.
-    case "$DESCRIPTION" in
-
-        *TOPIC_CLOSED*)
-
-            tg_api reopenForumTopic \
-                --data-urlencode "chat_id=${CHAT_ID}" \
-                --data-urlencode "message_thread_id=${THREAD}" \
-                >/dev/null
-
-            RESPONSE="$(send_message)"
-            ;;
-
-        *"thread not found"*|*TOPIC_DELETED*)
-
-            topic_forget
-
-            THREAD="$(topic_create)"
-
-            [ -n "$THREAD" ] &&
-                echo "[PEARZ] Telegram topic '$GAME' recreated: $THREAD"
-
-            RESPONSE="$(send_message)"
-            ;;
-    esac
-
-    # Still no: post to the group itself rather than lose it.
-    if ! tg_ok "$RESPONSE" && [ -n "$THREAD" ]; then
-
-        THREAD=""
-        RESPONSE="$(send_message)"
+    if [ -e "$root" ] && [ ! -d "$root" ]; then
+        # Do not overwrite an old single-file cache format.
+        root="${root}.d"
     fi
+
+    mkdir -p "$root"
+    cat > "$root/${safe}.topic" <<CACHE
+GAME=$GAME
+CHAT_ID=$CHAT_ID
+TOPIC_ID=$id
+CACHE
+}
+
+create_topic() {
+    local response
+    local id
+    response="$(curl -fsS --max-time 20 -X POST \
+        --data-urlencode "chat_id=$CHAT_ID" \
+        --data-urlencode "name=$GAME" \
+        "$API/createForumTopic" 2>/dev/null || true)"
+    id="$(printf '%s' "$response" | json_result_field message_thread_id)"
+    if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+        store_topic "$id"
+        echo "[PEARZ] Telegram topic '$GAME' created: $id" >&2
+        printf '%s' "$id"
+    fi
+}
+
+TOPIC_ID="${UMP_TELEGRAM_TOPIC_ID:-}"
+if [ -z "$TOPIC_ID" ]; then
+    TOPIC_ID="$(mapped_topic)"
+fi
+if [ -z "$TOPIC_ID" ]; then
+    TOPIC_ID="$(cached_topic)"
+fi
+if [ -z "$TOPIC_ID" ] && truthy "${UMP_TELEGRAM_AUTO_TOPIC:-1}"; then
+    TOPIC_ID="$(create_topic)"
 fi
 
-tg_ok "$RESPONSE" ||
-    echo "[PEARZ] Telegram message not sent: $(tg_error "$RESPONSE")"
-
-# ------------------------------------------------------------
-# Artifact
-#
-# A bot may upload 50 MB, which most AAB/APK builds pass.
-# ------------------------------------------------------------
-
-if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
-
-    SIZE=$(
-        stat -f%z "$ARTIFACT" 2>/dev/null ||
-        stat -c%s "$ARTIFACT" 2>/dev/null ||
-        echo 0
-    )
-
-    if [ "$SIZE" -le 52428800 ]; then
-
-        DOC_ARGS=(
-            -F "chat_id=${CHAT_ID}"
-            -F "document=@${ARTIFACT}"
-            -F "caption=${GAME} ${BRANCH} #${BUILD}"
-        )
-
-        [ -n "$THREAD" ] && DOC_ARGS+=(-F "message_thread_id=${THREAD}")
-
-        RESPONSE="$(tg_api sendDocument "${DOC_ARGS[@]}")"
-
-        tg_ok "$RESPONSE" ||
-            echo "[PEARZ] Telegram upload failed: $(tg_error "$RESPONSE")"
-
-    else
-
-        echo "[PEARZ] Telegram attachment skipped (>50 MB); status sent."
-
-    fi
+if [ -n "$TOPIC_ID" ]; then
+    echo "[PEARZ] Telegram topic '$GAME': $TOPIC_ID"
 fi
+
+CURL_ARGS=(
+    -fsS
+    --max-time 30
+    -X POST
+    --data-urlencode "chat_id=$CHAT_ID"
+    --data-urlencode "text=$MESSAGE"
+    --data-urlencode "disable_web_page_preview=true"
+)
+
+if [ -n "$TOPIC_ID" ]; then
+    CURL_ARGS+=(--data-urlencode "message_thread_id=$TOPIC_ID")
+fi
+
+curl "${CURL_ARGS[@]}" "$API/sendMessage" >/dev/null

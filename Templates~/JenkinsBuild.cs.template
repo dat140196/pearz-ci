@@ -294,6 +294,16 @@ public static class JenkinsBuild
             : PlayerSettings.Android.bundleVersionCode.ToString();
     }
 
+    private static string PackageName()
+    {
+        BuildTarget target = EditorUserBuildSettings.activeBuildTarget;
+        BuildTargetGroup group = target == BuildTarget.iOS
+            ? BuildTargetGroup.iOS
+            : BuildTargetGroup.Android;
+
+        return PlayerSettings.GetApplicationIdentifier(group);
+    }
+
     private static void WriteBuildInfo(string artifact)
     {
         try
@@ -306,6 +316,7 @@ public static class JenkinsBuild
                 "PRODUCT_NAME_SAFE=" + Sanitize(PlayerSettings.productName),
                 "VERSION=" + PlayerSettings.bundleVersion,
                 "BUILD_NUMBER=" + BuildNumber(),
+                "PACKAGE_NAME=" + PackageName(),
                 "ARTIFACT=" + artifact
             };
 

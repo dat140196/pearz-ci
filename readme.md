@@ -58,7 +58,7 @@ Every generated build script prints the UMP version in Jenkins logs. If the log 
 |---|---|---|
 | `release/android` | Android `.aab` | Release keystore required, then Google Drive upload |
 | `release/android-test` | Android `.apk` | Custom/release keystore skipped, then Google Drive upload |
-| `release/ios-test` | Xcode project + direct device install | Append Xcode project, optional Firebase/APNs stripping, CocoaPods workspace build, then Drive BUILD_INFO upload |
+| `release/ios-test` | Xcode project + direct device install | CocoaPods workspace build; Firebase OFF strips APNs + Crashlytics build phase; then Drive BUILD_INFO upload |
 | `release/ios` | Archive / Export / TestFlight | Production iOS flow, CocoaPods workspace archive when needed, then Drive BUILD_INFO upload |
 
 Any other branch is rejected by the pipeline validation stage.
@@ -255,6 +255,21 @@ UMP_IOS_PODS_REPO_UPDATE=1
 
 If there is no `Podfile`, UMP keeps the normal `.xcodeproj` build path.
 
+### Firebase test integration (`release/ios-test`)
+
+Jenkins exposes this boolean parameter:
+
+```text
+IOS_TEST_ENABLE_FIREBASE_PUSH
+```
+
+The parameter name is kept for compatibility, but in UMP 1.0.9 it controls the generated iOS-test Firebase requirements as a group:
+
+- **OFF (default):** remove `com.apple.Push`, remove `aps-environment`, and remove the generated **Crashlytics Run Script** build phase from the exported Xcode project. This avoids Personal Team/APNs signing failures and avoids Crashlytics requiring a missing `GoogleService-Info.plist`. Firebase packages and Unity game source are not edited.
+- **ON:** keep APNs + Crashlytics. The signing profile must support Push Notifications and the correct `GoogleService-Info.plist` must be available to the generated Xcode project.
+
+The cleanup runs after Unity export and after `pod install`, so Xcode builds the final `.xcworkspace` after the CI-only edits are applied. Production `release/ios` is not modified by this test-only cleanup.
+
 ### Personal Team / In-App Purchase cleanup
 
 For `release/ios-test`, UMP performs device-test-only cleanup after Unity export:
@@ -291,12 +306,23 @@ Typical message:
 Branch: release/android
 Build: #14
 Version: 1.0.0 (7)
+Package: com.pearz.meowpuzzle
 Artifact: MeowPuzzle-v1.0.0.aab
 Drive: https://drive.google.com/file/d/.../view
+Build Info: https://drive.google.com/file/d/.../view
 Jenkins: http://.../job/MeowPuzzle/job/release%2Fandroid/14/
 ```
 
-`Version` is generated from Unity Player Settings and written to `Builds/ump_build_info.txt`.
+`Version`, build number, and `Package` are generated from Unity Player Settings and written to `Builds/ump_build_info.txt`. `Package` is the Android application ID or iOS bundle identifier.
+
+Drive URL metadata is separated so Telegram can show both links without one overwriting the other:
+
+```text
+Builds/ump_drive_url.txt                 # APK/AAB artifact URL
+Builds/ump_build_info_drive_url.txt      # BUILD_INFO URL
+```
+
+For iOS, only the stable `<GameName>_BUILD_INFO.txt` is uploaded to Drive, so Telegram normally shows `Build Info:` and no Drive artifact URL.
 
 The game name normally comes from `PlayerSettings.productName`. Override it with:
 
@@ -338,7 +364,15 @@ When upgrading UMP:
 ## Current version
 
 ```text
-UMP 1.0.8
+UMP 1.0.9
 ```
 
-The package version intentionally remains `1.0.8` to match the Git tag used by Unity projects.
+Key changes in 1.0.9:
+
+```text
+- iOS test: when Firebase is OFF, strip the generated Crashlytics Run Script in addition to APNs requirements.
+- Build metadata: add PACKAGE_NAME (Android application ID / iOS bundle identifier).
+- Drive: write BUILD_INFO URL separately to Builds/ump_build_info_drive_url.txt.
+- Telegram: add Package and Build Info link to the notification.
+- Jenkins: clear per-build URL/build-info metadata first to prevent stale links in notifications.
+```

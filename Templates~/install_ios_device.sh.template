@@ -374,6 +374,15 @@ if ! xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG"; then
         echo "[PEARZ] that supports the Push Notifications capability."
     fi
 
+    if grep -qE 'Unable to read Google Service plist|GoogleService-Info\.plist' "$BUILD_LOG"; then
+        echo "[PEARZ] Firebase GoogleService-Info.plist requirement detected."
+        echo "[PEARZ] If Firebase is OFF for release/ios-test, the generated"
+        echo "[PEARZ] Crashlytics Run Script should have been stripped before xcodebuild."
+        echo "[PEARZ] Re-sync UMP generated files and keep"
+        echo "[PEARZ] IOS_TEST_ENABLE_FIREBASE_PUSH unchecked."
+        echo "[PEARZ] If Firebase is ON, add the correct GoogleService-Info.plist."
+    fi
+
     if grep -qE 'No Accounts|No profiles for|requires a development team' "$BUILD_LOG"; then
         echo "[PEARZ] Signing account/profile problem detected."
         echo "[PEARZ] Ensure Xcode is signed in for team $TEAM and the Jenkins"

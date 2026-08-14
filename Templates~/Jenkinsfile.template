@@ -152,15 +152,15 @@ pipeline {
     parameters {
 
         // release/ios-test only. OFF is the safe default for
-        // Personal Team device builds: Push Notifications/APNs
-        // signing requirements are removed from the exported Xcode
-        // project after Unity finishes. Turn ON only when this build
-        // is specifically testing Firebase Cloud Messaging / APNs
-        // with an Apple Developer team that supports Push.
+        // Personal Team/device builds: APNs signing requirements and
+        // the generated Crashlytics Run Script are removed from the
+        // exported Xcode project. Turn ON only when this build is
+        // specifically testing Firebase and has the required Apple
+        // Push profile + GoogleService-Info.plist.
         booleanParam(
             name: 'IOS_TEST_ENABLE_FIREBASE_PUSH',
             defaultValue: false,
-            description: 'release/ios-test: keep Firebase/APNs Push Notifications. OFF strips Push signing requirements for Personal Team.'
+            description: 'release/ios-test: keep Firebase Push + Crashlytics. OFF strips APNs signing + Crashlytics Run Script from generated Xcode for Personal Team.'
         )
     }
 
@@ -225,6 +225,20 @@ pipeline {
                         echo "[PEARZ] Branch    : ${env.BRANCH_NAME}"
                         echo "[PEARZ] Checkout  : ${env.WORKSPACE}"
                         echo "========================================"
+
+                        // This workspace is intentionally persistent (iOS append
+                        // export), so remove only per-build metadata. Otherwise a
+                        // failed build could send a Drive URL/package from an older
+                        // successful build in Telegram.
+                        sh '''
+                            mkdir -p Builds
+                            rm -f \
+                                Builds/ump_drive_url.txt \
+                                Builds/ump_build_info_drive_url.txt \
+                                Builds/ump_build_info.txt
+                            find Builds -maxdepth 1 -type f \
+                                -name '*_BUILD_INFO.txt' -delete 2>/dev/null || true
+                        '''
                     }
                 }
             }
@@ -424,20 +438,20 @@ pipeline {
                         firebasePushEnabled ? '0' : '1'
 
                     echo '========================================'
-                    echo '[PEARZ] iOS test Firebase Push: ' +
+                    echo '[PEARZ] iOS test Firebase integration: ' +
                          (firebasePushEnabled ?
-                            'ENABLED - keep APNs capability' :
-                            'DISABLED - strip APNs signing requirements')
+                            'ENABLED - keep APNs + Crashlytics' :
+                            'DISABLED - strip APNs + Crashlytics Run Script')
                     echo '========================================'
 
                     def run = {
 
                         // The strip runs between the two on purpose:
-                        // Unity/Firebase packages add capabilities from
-                        // post-process callbacks. Only after Unity exits
-                        // is the exported Xcode project final. The strip
-                        // changes only that generated Xcode project; it
-                        // never edits the Unity project or Firebase code.
+                        // Unity/Firebase packages add capabilities and the
+                        // Crashlytics build phase from post-process callbacks.
+                        // build_ios.sh also finishes CocoaPods first. The strip
+                        // therefore runs on the final generated Xcode project and
+                        // never edits the Unity project or Firebase package code.
                         withEnv([
                             "UMP_IOS_STRIP_FIREBASE_PUSH=${stripFirebasePush}"
                         ]) {
@@ -804,7 +818,11 @@ pipeline {
                     artifacts:
                         'Builds/**/*.apk,' +
                         'Builds/**/*.aab,' +
-                        'Builds/**/*.ipa',
+                        'Builds/**/*.ipa,' +
+                        'Builds/*_BUILD_INFO.txt,' +
+                        'Builds/ump_build_info.txt,' +
+                        'Builds/ump_build_info_drive_url.txt,' +
+                        'Builds/ump_drive_url.txt',
                     allowEmptyArchive: true
                 )
             }

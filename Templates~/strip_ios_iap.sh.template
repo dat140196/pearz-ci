@@ -10,13 +10,14 @@ set -euo pipefail
 #   - finish the Personal Team IAP cleanup.
 #
 # Optional for release/ios-test:
-#   - strip Firebase/APNs Push Notifications signing requirements
-#     from the generated Xcode project only. This does NOT edit the
-#     Unity project, Firebase packages, or game source code.
+#   - disable Firebase test-only Xcode requirements when the Jenkins
+#     Firebase checkbox is OFF: strip Push/APNs signing requirements
+#     and the generated Crashlytics Run Script build phase. This does
+#     NOT edit the Unity project, Firebase packages, or game source code.
 #
 # Jenkins checkbox IOS_TEST_ENABLE_FIREBASE_PUSH maps to:
-#   UMP_IOS_STRIP_FIREBASE_PUSH=1  -> strip Push/APNs (default)
-#   UMP_IOS_STRIP_FIREBASE_PUSH=0  -> keep Push/APNs for FCM testing
+#   UMP_IOS_STRIP_FIREBASE_PUSH=1  -> strip APNs + Crashlytics phase (default)
+#   UMP_IOS_STRIP_FIREBASE_PUSH=0  -> keep Firebase/APNs/Crashlytics for testing
 #
 # Optional env vars:
 #   UMP_IOS_PROJECT=/path/to/Unity-iPhone.xcodeproj
@@ -136,13 +137,15 @@ fi
 echo "[PEARZ] Local IAP capability marker: absent."
 
 # ------------------------------------------------------------
-# Optional Firebase / APNs Push cleanup for Personal Team builds.
+# Optional Firebase cleanup for Personal Team test builds.
 #
-# FCM on iOS is delivered through APNs. The signing-sensitive part
-# is the Push Notifications capability / aps-environment entitlement.
-# Remove those only from the generated Xcode project. Keep all
-# Firebase assemblies, Unity code, GoogleService-Info.plist, and
-# production release/ios behavior untouched.
+# When the Jenkins Firebase checkbox is OFF, remove only generated
+# Xcode requirements that block a local test build:
+#   - Push Notifications capability / aps-environment entitlement
+#   - Crashlytics Run Script build phase (it requires GoogleService-Info.plist)
+#
+# Firebase assemblies/packages and Unity game source remain untouched.
+# Production release/ios never runs this cleanup.
 # ------------------------------------------------------------
 STRIP_FIREBASE_PUSH="${UMP_IOS_STRIP_FIREBASE_PUSH:-1}"
 
@@ -157,7 +160,8 @@ esac
 
 if [ "$STRIP_FIREBASE_PUSH" = "1" ]; then
     echo "========================================"
-    echo "[PEARZ] Firebase Push/APNs : STRIP for test signing"
+    echo "[PEARZ] Firebase test integration: DISABLED"
+    echo "[PEARZ] Strip: APNs capability + Crashlytics Run Script"
     echo "========================================"
 
     PUSH_BEFORE="$(grep -nE 'com\.apple\.Push|Push Notifications' \
@@ -227,11 +231,108 @@ if [ "$STRIP_FIREBASE_PUSH" = "1" ]; then
 
     echo "[PEARZ] Entitlements files found : $ENTITLEMENTS_FOUND"
     echo "[PEARZ] aps-environment removed : $APS_REMOVED"
+
+    # Firebase Crashlytics adds a PBXShellScriptBuildPhase to the generated
+    # Unity-iPhone target. That phase fails when the test export has no
+    # GoogleService-Info.plist. Remove the phase only
+    # when Firebase test integration is OFF. Ruby is used here because it is
+    # available with Xcode/macOS and lets us remove the PBX object + GUID
+    # references without touching other Firebase package references.
+    if ! command -v ruby >/dev/null 2>&1; then
+        echo "[PEARZ] ERROR: ruby is required to strip Crashlytics build phase."
+        exit 1
+    fi
+
+    ruby - "$PBXPROJ" <<'RUBY'
+path = ARGV.fetch(0)
+lines = File.readlines(path)
+start_re = /^(\s*)([A-Fa-f0-9]{24})(?: \/\*.*?\*\/)? = \{\s*$/
+keywords = /Crashlytics Run Script|Crashlytics\/run|FirebaseCrashlytics|upload-symbols/i
+removed = []
+out = []
+i = 0
+
+while i < lines.length
+  line = lines[i]
+  match = start_re.match(line)
+
+  if match
+    indent = match[1]
+    guid = match[2]
+    block = [line]
+    j = i + 1
+    finish_re = /^#{Regexp.escape(indent)}\};\s*$/
+
+    while j < lines.length
+      block << lines[j]
+      break if finish_re.match?(lines[j])
+      j += 1
+    end
+
+    text = block.join
+    if text.include?('isa = PBXShellScriptBuildPhase;') && text.match?(keywords)
+      name = text[/name = \"?([^\";]+)\"?;/, 1] ||
+             text[/\/\* (.*?) \*\//, 1] || 'Crashlytics script'
+      removed << [guid, name]
+      i = j + 1
+      next
+    end
+  end
+
+  out << line
+  i += 1
+end
+
+removed_ids = removed.map(&:first)
+unless removed_ids.empty?
+  out.reject! { |line| removed_ids.any? { |guid| line.include?(guid) } }
+end
+
+File.write(path, out.join)
+
+removed.each do |guid, name|
+  puts "[PEARZ] Removed Crashlytics build phase: #{name} (#{guid})"
+end
+puts "[PEARZ] Crashlytics build phases removed: #{removed.length}"
+
+# Verify no Crashlytics shell phase survived. Package/framework references
+# are allowed to remain; only a shell phase is forbidden in Firebase-OFF mode.
+verify_lines = File.readlines(path)
+i = 0
+while i < verify_lines.length
+  line = verify_lines[i]
+  match = start_re.match(line)
+  unless match
+    i += 1
+    next
+  end
+
+  indent = match[1]
+  block = [line]
+  j = i + 1
+  finish_re = /^#{Regexp.escape(indent)}\};\s*$/
+  while j < verify_lines.length
+    block << verify_lines[j]
+    break if finish_re.match?(verify_lines[j])
+    j += 1
+  end
+
+  text = block.join
+  if text.include?('isa = PBXShellScriptBuildPhase;') && text.match?(keywords)
+    warn '[PEARZ] ERROR: Crashlytics shell build phase still exists.'
+    exit 1
+  end
+  i = j + 1
+end
+RUBY
+
     echo "[PEARZ] Firebase SDK/code       : untouched"
+    echo "[PEARZ] GoogleService plist    : not required while Firebase test is OFF"
 else
     echo "========================================"
-    echo "[PEARZ] Firebase Push/APNs : KEEP for FCM test"
-    echo "[PEARZ] Apple Developer Push capability/profile is required."
+    echo "[PEARZ] Firebase test integration: ENABLED"
+    echo "[PEARZ] Keep: APNs capability + Crashlytics Run Script"
+    echo "[PEARZ] Apple Push profile and GoogleService-Info.plist are required."
     echo "========================================"
 fi
 

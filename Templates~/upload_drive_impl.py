@@ -22,8 +22,9 @@ Destination behavior:
   Drive name gets a version suffix, e.g. MeowTrail_BUILD_INFO_v1.2.3.txt.
   Rebuilding the same version updates that same Drive file/revision.
 - UMP_DRIVE_BUILD_INFO_ONLY=1 uploads exactly the supplied *_BUILD_INFO.txt
-  into <Game name>/IOS, without a version suffix, without a companion upload,
-  and without replacing Builds/ump_drive_url.txt.
+  into <Game name>/IOS, without a version suffix and without a companion upload.
+- Artifact URL metadata is written to Builds/ump_drive_url.txt. BUILD_INFO URL
+  metadata is written separately to Builds/ump_build_info_drive_url.txt.
 """
 
 import json
@@ -373,7 +374,26 @@ def send_chunks(session_uri, access_token, file_path, file_size):
     return result
 
 
-def report_upload(result, file_path, write_url_file):
+def write_url_metadata(path, url, file_name):
+    if not path:
+        return
+    if not url:
+        log("WARNING: Drive URL is empty; not writing %s" % path)
+        return
+
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as output:
+            output.write("url=" + url + "\n")
+            output.write("artifact=" + file_name + "\n")
+        log("URL metadata: " + path)
+    except Exception as error:
+        log("WARNING: could not write %s: %s" % (path, error))
+
+
+def report_upload(result, file_path, url_file=None):
     file_id = result.get("id", "")
     file_name = result.get("name", os.path.basename(file_path))
     url = result.get("webViewLink") or (
@@ -385,23 +405,10 @@ def report_upload(result, file_path, write_url_file):
     log("File name: " + file_name)
     log("Drive URL: " + (url or "unknown"))
 
-    # Keep Builds/ump_drive_url.txt pointing at the actual APK/AAB/IPA.
-    # Telegram and post-build messages consume that file, so the optional
-    # BUILD_INFO upload must never replace it with a text-file URL.
-    if not write_url_file:
-        return
-
-    url_path = os.environ.get("UMP_DRIVE_URL_FILE", "Builds/ump_drive_url.txt")
-    try:
-        directory = os.path.dirname(url_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(url_path, "w", encoding="utf-8") as output:
-            output.write("url=" + url + "\n")
-            output.write("artifact=" + os.path.basename(file_path) + "\n")
-    except Exception as error:
-        log("WARNING: could not write %s: %s" % (url_path, error))
-
+    # Artifact and BUILD_INFO URLs are kept in separate files. This prevents
+    # the text-file URL from replacing the APK/AAB URL while still letting
+    # Telegram include a dedicated Build Info link.
+    write_url_metadata(url_file, url, file_name)
 
 def read_key_value_file(path):
     values = {}
@@ -534,7 +541,7 @@ def build_info_drive_name(local_path, info):
     return "%s_%s%s" % (base, version_label, ext)
 
 
-def upload(access_token, folder_id, file_path, remote_name=None, write_url_file=True):
+def upload(access_token, folder_id, file_path, remote_name=None, url_file=None):
     file_name = remote_name or os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
     if file_size <= 0:
@@ -550,7 +557,7 @@ def upload(access_token, folder_id, file_path, remote_name=None, write_url_file=
         access_token, folder_id, file_name, file_size, target_id
     )
     result = send_chunks(session_uri, access_token, file_path, file_size)
-    report_upload(result, file_path, write_url_file)
+    report_upload(result, file_path, url_file=url_file)
 
 
 def main():
@@ -611,13 +618,21 @@ def main():
             access_token,
             target_folder,
             artifact,
-            write_url_file=False,
+            url_file=os.environ.get(
+                "UMP_BUILD_INFO_DRIVE_URL_FILE",
+                "Builds/ump_build_info_drive_url.txt",
+            ),
         )
         return
 
-    # Upload the game artifact first. This is still the canonical URL written
-    # to Builds/ump_drive_url.txt and used by Telegram notifications.
-    upload(access_token, target_folder, artifact)
+    # Upload the game artifact first. Keep its URL separate from the optional
+    # BUILD_INFO URL so Telegram can show both.
+    upload(
+        access_token,
+        target_folder,
+        artifact,
+        url_file=os.environ.get("UMP_DRIVE_URL_FILE", "Builds/ump_drive_url.txt"),
+    )
 
     companion = find_companion_build_info(artifact, info_values)
     if companion:
@@ -630,7 +645,10 @@ def main():
             target_folder,
             companion,
             remote_name=drive_name,
-            write_url_file=False,
+            url_file=os.environ.get(
+                "UMP_BUILD_INFO_DRIVE_URL_FILE",
+                "Builds/ump_build_info_drive_url.txt",
+            ),
         )
     else:
         log("Companion BUILD_INFO: not found - skipped (optional).")
