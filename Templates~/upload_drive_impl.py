@@ -7,8 +7,9 @@ Required environment variables:
     UMP_DRIVE_OAUTH_REFRESH_TOKEN
     UMP_DRIVE_FOLDER_ID
 
-Destination behavior is intentionally the same as the previous uploader:
-    <root>/<Game name>/<APK|AAB|IPA>/<artifact>
+Destination behavior:
+    Android: <root>/<Game name>/<APK|AAB>/<artifact>
+    iOS info-only mode: <root>/<Game name>/IOS/<GameName>_BUILD_INFO.txt
 
 - Missing folders are created automatically.
 - Same-name file in the same folder is UPDATED, not recreated. This keeps
@@ -20,6 +21,9 @@ Destination behavior is intentionally the same as the previous uploader:
   Builds/), it is uploaded into the SAME Drive folder as the artifact. Its
   Drive name gets a version suffix, e.g. MeowTrail_BUILD_INFO_v1.2.3.txt.
   Rebuilding the same version updates that same Drive file/revision.
+- UMP_DRIVE_BUILD_INFO_ONLY=1 uploads exactly the supplied *_BUILD_INFO.txt
+  into <Game name>/IOS, without a version suffix, without a companion upload,
+  and without replacing Builds/ump_drive_url.txt.
 """
 
 import json
@@ -436,7 +440,18 @@ def game_name(info):
     return job.split("/")[0] if job else ""
 
 
+def is_truthy(value):
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def sub_path(file_path, info):
+    # iOS BUILD_INFO-only uploads always live in <Game>/IOS.
+    # Keep this before UMP_DRIVE_SUBPATH so a machine/global override
+    # cannot accidentally route iOS metadata into APK/AAB folders.
+    if is_truthy(os.environ.get("UMP_DRIVE_BUILD_INFO_ONLY", "")):
+        parts = [part for part in (game_name(info), "IOS") if part]
+        return "/".join(parts)
+
     if "UMP_DRIVE_SUBPATH" in os.environ:
         return os.environ["UMP_DRIVE_SUBPATH"].strip()
 
@@ -579,6 +594,26 @@ def main():
                 % (path, error.code, detail)
             )
             target_folder = root_id
+
+    build_info_only = is_truthy(
+        os.environ.get("UMP_DRIVE_BUILD_INFO_ONLY", "")
+    )
+
+    if build_info_only:
+        if not os.path.basename(artifact).endswith("_BUILD_INFO.txt"):
+            raise RuntimeError(
+                "UMP_DRIVE_BUILD_INFO_ONLY requires a *_BUILD_INFO.txt file: "
+                + artifact
+            )
+        log("Mode: iOS BUILD_INFO only")
+        log("No IPA/app will be uploaded to Drive.")
+        upload(
+            access_token,
+            target_folder,
+            artifact,
+            write_url_file=False,
+        )
+        return
 
     # Upload the game artifact first. This is still the canonical URL written
     # to Builds/ump_drive_url.txt and used by Telegram notifications.

@@ -9,15 +9,15 @@ echo "[PEARZ] Auth       : OAuth 2.0 Client ID"
 echo "========================================"
 
 if [ "$#" -lt 1 ]; then
-    echo "[PEARZ] ERROR: Missing artifact."
+    echo "[PEARZ] ERROR: Missing upload file."
     exit 1
 fi
 
-ARTIFACT="$1"
+UPLOAD_FILE="$1"
 
-if [ ! -f "$ARTIFACT" ]; then
-    echo "[PEARZ] ERROR: Artifact not found:"
-    echo "$ARTIFACT"
+if [ ! -f "$UPLOAD_FILE" ]; then
+    echo "[PEARZ] ERROR: Upload file not found:"
+    echo "$UPLOAD_FILE"
     exit 1
 fi
 
@@ -37,9 +37,12 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "[PEARZ] Artifact   : $ARTIFACT"
+echo "[PEARZ] File       : $UPLOAD_FILE"
+if [ "${UMP_DRIVE_BUILD_INFO_ONLY:-0}" = "1" ]; then
+    echo "[PEARZ] Mode       : iOS BUILD_INFO only"
+fi
 
-python3 "$SCRIPT_DIR/upload_drive_impl.py" "$ARTIFACT"
+python3 "$SCRIPT_DIR/upload_drive_impl.py" "$UPLOAD_FILE"
 
 echo "========================================"
 echo "[PEARZ] Google Drive upload completed."

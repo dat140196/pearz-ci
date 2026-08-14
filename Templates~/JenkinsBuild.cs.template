@@ -309,9 +309,18 @@ public static class JenkinsBuild
                 "ARTIFACT=" + artifact
             };
 
-            File.WriteAllText(InfoFile, string.Join("\n", lines) + "\n");
+            string content = string.Join("\n", lines) + "\n";
+            File.WriteAllText(InfoFile, content);
+
+            // Human-readable companion file used by Drive uploads. Keep the
+            // stable internal ump_build_info.txt for Jenkins/Telegram, while
+            // also exposing the conventional <GameName>_BUILD_INFO.txt.
+            string gameInfoFile =
+                "Builds/" + Sanitize(PlayerSettings.productName) + "_BUILD_INFO.txt";
+            File.WriteAllText(gameInfoFile, content);
 
             UnityEngine.Debug.Log("[UMP] Build info: " + InfoFile);
+            UnityEngine.Debug.Log("[UMP] Game build info: " + gameInfoFile);
         }
         catch (Exception ex)
         {

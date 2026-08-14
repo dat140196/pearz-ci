@@ -7,6 +7,15 @@ set -euo pipefail
 # Unity appends to an Xcode project that is already there, so
 # Signing & Capabilities set up by hand in Xcode survives every
 # build. UMP_IOS_CLEAN=1 exports from scratch instead.
+#
+# If Unity/EDM4U generates a Podfile, Jenkins runs pod install
+# immediately after Unity exits. Capability cleanup then runs on
+# the final Pods-integrated Xcode project before xcodebuild.
+#
+# Optional env vars:
+#   UMP_IOS_POD_BIN=/path/to/pod
+#   UMP_IOS_AUTO_INSTALL_COCOAPODS=0  # do not auto-install via Homebrew
+#   UMP_IOS_PODS_REPO_UPDATE=1       # pass --repo-update to pod install
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,7 +23,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 chmod +x "$SCRIPT_DIR/find_unity.sh" 2>/dev/null || true
 
 UNITY_PATH="$("$SCRIPT_DIR/find_unity.sh")"
-
 if [ -z "$UNITY_PATH" ] || [ ! -x "$UNITY_PATH" ]; then
     echo "[PEARZ] ERROR: Unity executable not found."
     exit 1
@@ -29,7 +37,6 @@ echo "[PEARZ] UMP        : @UMP_VERSION@"
 echo "[PEARZ] Unity Path : $UNITY_PATH"
 echo "[PEARZ] Branch     : ${BRANCH_NAME:-unknown}"
 echo "[PEARZ] Workspace  : $WORKSPACE"
-
 if [ "${UMP_IOS_CLEAN:-0}" = "1" ]; then
     echo "[PEARZ] Export     : clean (UMP_IOS_CLEAN=1)"
 else
@@ -48,3 +55,113 @@ fi
 echo "========================================"
 echo "[PEARZ] iOS Xcode project generated"
 echo "========================================"
+
+# ------------------------------------------------------------
+# CocoaPods / native iOS dependencies
+# ------------------------------------------------------------
+PROJECT="${UMP_IOS_PROJECT:-}"
+if [ -z "$PROJECT" ]; then
+    PROJECT="$(find "$WORKSPACE/Builds/iOS" \
+        -maxdepth 2 \
+        -type d \
+        -name '*.xcodeproj' \
+        2>/dev/null | head -n 1 || true)"
+fi
+
+if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
+    echo "[PEARZ] ERROR: no Xcode project under $WORKSPACE/Builds/iOS"
+    exit 1
+fi
+
+IOS_PATH="$(dirname "$PROJECT")"
+PODFILE="$IOS_PATH/Podfile"
+
+find_pod() {
+    if [ -n "${UMP_IOS_POD_BIN:-}" ] && [ -x "$UMP_IOS_POD_BIN" ]; then
+        printf '%s\n' "$UMP_IOS_POD_BIN"
+        return 0
+    fi
+    if command -v pod >/dev/null 2>&1; then
+        command -v pod
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/pod /usr/local/bin/pod; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_brew() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -f "$PODFILE" ]; then
+    echo "========================================"
+    echo "[PEARZ] CocoaPods"
+    echo "[PEARZ] Podfile      : $PODFILE"
+    echo "========================================"
+
+    POD_BIN="$(find_pod || true)"
+
+    if [ -z "$POD_BIN" ] && [ "${UMP_IOS_AUTO_INSTALL_COCOAPODS:-1}" != "0" ]; then
+        BREW_BIN="$(find_brew || true)"
+        if [ -n "$BREW_BIN" ]; then
+            echo "[PEARZ] CocoaPods is missing. Installing with Homebrew..."
+            "$BREW_BIN" install cocoapods
+            POD_BIN="$(find_pod || true)"
+        fi
+    fi
+
+    if [ -z "$POD_BIN" ]; then
+        echo "[PEARZ] ERROR: Podfile exists but CocoaPods is not installed."
+        echo "[PEARZ] Install it once on the Jenkins Mac with: brew install cocoapods"
+        echo "[PEARZ] Or set UMP_IOS_POD_BIN to the pod executable."
+        exit 1
+    fi
+
+    echo "[PEARZ] pod          : $POD_BIN"
+
+    POD_ARGS=(install)
+    if [ "${UMP_IOS_PODS_REPO_UPDATE:-0}" = "1" ]; then
+        POD_ARGS+=(--repo-update)
+    fi
+
+    (
+        cd "$IOS_PATH"
+        export LANG="${LANG:-en_US.UTF-8}"
+        export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+        "$POD_BIN" "${POD_ARGS[@]}"
+    )
+
+    XCODE_WORKSPACE="$IOS_PATH/Unity-iPhone.xcworkspace"
+    if [ ! -d "$XCODE_WORKSPACE" ]; then
+        XCODE_WORKSPACE="$(find "$IOS_PATH" \
+            -maxdepth 1 \
+            -type d \
+            -name '*.xcworkspace' \
+            2>/dev/null | head -n 1 || true)"
+    fi
+
+    if [ -z "$XCODE_WORKSPACE" ] || [ ! -d "$XCODE_WORKSPACE" ]; then
+        echo "[PEARZ] ERROR: pod install completed but no .xcworkspace was generated."
+        exit 1
+    fi
+
+    echo "[PEARZ] Workspace    : $XCODE_WORKSPACE"
+    echo "[PEARZ] CocoaPods dependencies ready."
+else
+    echo "[PEARZ] Podfile      : not found - CocoaPods skipped."
+fi

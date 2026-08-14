@@ -7,7 +7,7 @@ Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google D
 Install with Unity Package Manager using **Add package from Git URL**:
 
 ```text
-https://github.com/dat140196/pearz-ci.git#1.0.8
+https://github.com/dat140196/pearz-ci.git#1.0.9
 ```
 
 Pin the package version/tag in `Packages/manifest.json` so Unity does not have to follow a moving Git revision on every build:
@@ -15,7 +15,7 @@ Pin the package version/tag in `Packages/manifest.json` so Unity does not have t
 ```json
 {
   "dependencies": {
-    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.8"
+    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.9"
   }
 }
 ```
@@ -58,8 +58,8 @@ Every generated build script prints the UMP version in Jenkins logs. If the log 
 |---|---|---|
 | `release/android` | Android `.aab` | Release keystore required, then Google Drive upload |
 | `release/android-test` | Android `.apk` | Custom/release keystore skipped, then Google Drive upload |
-| `release/ios-test` | Xcode project + direct device install | Append existing Xcode project, Personal Team/device signing, test-only IAP cleanup |
-| `release/ios` | Archive / Export / TestFlight | Production iOS flow; device-test IAP cleanup is not applied |
+| `release/ios-test` | Xcode project + direct device install | Append Xcode project, optional Firebase/APNs stripping, CocoaPods workspace build, then Drive BUILD_INFO upload |
+| `release/ios` | Archive / Export / TestFlight | Production iOS flow, CocoaPods workspace archive when needed, then Drive BUILD_INFO upload |
 
 Any other branch is rejected by the pipeline validation stage.
 
@@ -95,139 +95,23 @@ If `UMP_ANDROID_KEYSTORE` is not configured, the release branch falls back to th
 
 ### Google Drive OAuth 2.0
 
-Create these four credentials as **Secret text**:
+Drive upload runs after successful Android and iOS builds.
 
-```text
-UMP_DRIVE_OAUTH_CLIENT_ID
-UMP_DRIVE_OAUTH_CLIENT_SECRET
-UMP_DRIVE_OAUTH_REFRESH_TOKEN
-UMP_DRIVE_FOLDER_ID
-```
-
-`UMP_DRIVE_SERVICE_ACCOUNT_JSON` is no longer used.
-
-### Telegram
-
-Create these as **Secret text**:
-
-```text
-UMP_TELEGRAM_BOT_TOKEN
-UMP_TELEGRAM_CHAT_ID
-```
-
-### iOS keychain
-
-When required by the Jenkins Mac/Xcode setup:
-
-```text
-UMP_KEYCHAIN_PASSWORD
-```
-
-## SSH Git submodules
-
-Before Unity starts, Jenkins now initializes SSH submodules on every supported release branch. This is required for Unity local packages stored in submodules, for example:
-
-```text
-Packages/com.pearz.thirdparty
-```
-
-Example `.gitmodules`:
-
-```ini
-[submodule "Packages/com.pearz.thirdparty"]
-    path = Packages/com.pearz.thirdparty
-    url = git@github.com:PearzGame/pearz-thirdparty.git
-```
-
-The pipeline runs approximately:
-
-```bash
-git submodule sync --recursive
-git submodule foreach --recursive 'git reset --hard || true'
-git submodule foreach --recursive 'git clean -fd || true'
-git submodule update --init --recursive --force
-git submodule status --recursive
-```
-
-If `.gitmodules` does not exist, the stage is skipped cleanly.
-
-If `.gitmodules` declares `Packages/com.pearz.thirdparty`, Jenkins additionally verifies:
-
-```text
-Packages/com.pearz.thirdparty/package.json
-```
-
-This prevents Unity Package Manager from failing later with a misleading local-package dependency error.
-
-## Android signing
-
-### `release/android`
-
-This branch builds the Google Play `.aab` and **must use the release key**.
-
-Keystore lookup order is:
-
-1. Jenkins `UMP_ANDROID_*` credentials when configured.
-2. `Keystores/` inside the game repository.
-3. `~/.pearz/keystores` on the build machine, or `UMP_KEYSTORE_HOME` when overridden.
-
-A project keystore layout can look like:
-
-```text
-Keystores/
-  com.pearz.meowpuzzle.keystore
-  com.pearz.meowpuzzle.properties
-```
-
-Example properties:
-
-```properties
-storePass=your-store-password
-alias=pearz
-aliasPass=your-alias-password
-```
-
-Create a key once and back it up safely:
-
-```bash
-keytool -genkeypair -v \
-  -keystore Keystores/com.pearz.meowpuzzle.keystore \
-  -alias pearz \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 10000
-```
-
-Verify the real alias when debugging signing errors:
-
-```bash
-keytool -list -v -keystore Keystores/com.pearz.meowpuzzle.keystore
-```
-
-### `release/android-test`
-
-This branch builds an APK with Android debug/default signing.
-
-The pipeline intentionally:
-
-```text
-- does not request Jenkins release-keystore credentials
-- does not run the release keystore resolver
-- clears stale UMP_ANDROID_* environment variables
-- sets PlayerSettings.Android.useCustomKeystore = false
-```
-
-This prevents a test APK from being accidentally signed with the production key.
-
-## Google Drive OAuth 2.0
-
-Android artifacts are uploaded after a successful Android build.
-
-Default Drive path:
+Android keeps the artifact behavior:
 
 ```text
 <UMP_DRIVE_FOLDER_ID>/<Game name>/<AAB|APK>/<artifact>
 ```
+
+When `<GameName>_BUILD_INFO.txt` exists, Android also uploads a versioned companion BUILD_INFO into the same AAB/APK folder. Rebuilding the same version updates the same Drive file/revision.
+
+iOS intentionally uploads **no `.app` and no `.ipa` to Drive**. Both `release/ios-test` and `release/ios` upload only:
+
+```text
+<UMP_DRIVE_FOLDER_ID>/<Game name>/IOS/<GameName>_BUILD_INFO.txt
+```
+
+The iOS BUILD_INFO name is stable (no version suffix). A later iOS build updates the same Drive file so the file ID/share link stays stable.
 
 The uploader preserves the existing behavior:
 
@@ -351,6 +235,26 @@ UMP_IOS_CLEAN=1
 
 to force a clean Xcode export.
 
+### CocoaPods / Firebase / AppLovin native dependencies
+
+If Unity generates `Builds/iOS/<Game>/Podfile`, `Jenkins/build_ios.sh` runs `pod install` immediately after Unity export. For `release/ios-test`, capability cleanup then runs on that final Pods-integrated project. Device build/archive uses the generated `.xcworkspace` instead of the raw `.xcodeproj`, so native Pods such as Firebase and AppLovin MAX are visible to Xcode.
+
+UMP searches for `pod` in PATH, `/opt/homebrew/bin/pod`, and `/usr/local/bin/pod`. If it is missing and Homebrew exists, UMP installs CocoaPods with:
+
+```bash
+brew install cocoapods
+```
+
+Useful overrides:
+
+```text
+UMP_IOS_POD_BIN=/path/to/pod
+UMP_IOS_AUTO_INSTALL_COCOAPODS=0
+UMP_IOS_PODS_REPO_UPDATE=1
+```
+
+If there is no `Podfile`, UMP keeps the normal `.xcodeproj` build path.
+
 ### Personal Team / In-App Purchase cleanup
 
 For `release/ios-test`, UMP performs device-test-only cleanup after Unity export:
@@ -434,15 +338,7 @@ When upgrading UMP:
 ## Current version
 
 ```text
-UMP 1.2.7
+UMP 1.0.8
 ```
 
-Key changes through 1.2.7:
-
-```text
-1.2.3  iOS device build: remove StoreKit.framework from Unity-iPhone only.
-1.2.4  Android signing: release keystore only on release/android AAB.
-1.2.5  Google Drive: OAuth 2.0 Client ID + refresh token, preserve overwrite/folder logic.
-1.2.6  Jenkins: initialize/update SSH Git submodules before Unity Package Manager runs.
-1.2.7  Jenkins: use sshUserPrivateKey + GIT_SSH_COMMAND for submodules; no SSH Agent plugin required.
-```
+The package version intentionally remains `1.0.8` to match the Git tag used by Unity projects.

@@ -1,85 +1,169 @@
 #!/bin/bash
 set -euo pipefail
 
+# ============================================================
+# PEARZ iOS archive / export.
+#
+# If Unity generated a Podfile, install CocoaPods dependencies and
+# archive the generated .xcworkspace. Building the .xcodeproj while
+# Pods are present omits native dependencies such as Firebase/AppLovin.
+# ============================================================
+
 EXPORT="$WORKSPACE/Builds/iOSExport"
 OPTIONS="$WORKSPACE/Jenkins/ExportOptions.plist"
 INFO="$WORKSPACE/Builds/ump_build_info.txt"
-
-# Unity exports to Builds/iOS/<Game name>.
 PROJECT="${UMP_IOS_PROJECT:-}"
 
 if [ -z "$PROJECT" ]; then
-
     PROJECT="$(find "$WORKSPACE/Builds/iOS" \
         -maxdepth 2 \
         -type d \
-        -name "*.xcodeproj" \
+        -name '*.xcodeproj' \
         2>/dev/null | head -n 1 || true)"
 fi
 
 if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
-    echo "[PEARZ] ERROR: no Xcode project under"
-    echo "$WORKSPACE/Builds/iOS"
+    echo "[PEARZ] ERROR: no Xcode project under $WORKSPACE/Builds/iOS"
     exit 1
 fi
 
 IOS_PATH="$(dirname "$PROJECT")"
+PODFILE="$IOS_PATH/Podfile"
+WORKSPACE_FILE=""
+
+find_pod() {
+    if [ -n "${UMP_IOS_POD_BIN:-}" ] && [ -x "$UMP_IOS_POD_BIN" ]; then
+        printf '%s\n' "$UMP_IOS_POD_BIN"
+        return 0
+    fi
+    if command -v pod >/dev/null 2>&1; then
+        command -v pod
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/pod /usr/local/bin/pod; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_brew() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -f "$PODFILE" ]; then
+    # build_ios.sh normally ran pod install already, before capability
+    # cleanup. Reuse that workspace. Fallback supports manual archive use.
+    if [ -d "$IOS_PATH/Unity-iPhone.xcworkspace" ]; then
+        WORKSPACE_FILE="$IOS_PATH/Unity-iPhone.xcworkspace"
+    else
+        WORKSPACE_FILE="$(find "$IOS_PATH" -maxdepth 1 -type d -name '*.xcworkspace' \
+            2>/dev/null | head -n 1 || true)"
+    fi
+
+    if [ -z "$WORKSPACE_FILE" ]; then
+        echo "========================================"
+        echo "[PEARZ] CocoaPods fallback"
+        echo "[PEARZ] Podfile      : $PODFILE"
+        echo "========================================"
+
+        POD_BIN="$(find_pod || true)"
+        if [ -z "$POD_BIN" ] && [ "${UMP_IOS_AUTO_INSTALL_COCOAPODS:-1}" != "0" ]; then
+            BREW_BIN="$(find_brew || true)"
+            if [ -n "$BREW_BIN" ]; then
+                echo "[PEARZ] CocoaPods is missing. Installing with Homebrew..."
+                "$BREW_BIN" install cocoapods
+                POD_BIN="$(find_pod || true)"
+            fi
+        fi
+
+        if [ -z "$POD_BIN" ]; then
+            echo "[PEARZ] ERROR: Podfile exists but CocoaPods is not installed."
+            echo "[PEARZ] Install it once on the Jenkins Mac with: brew install cocoapods"
+            echo "[PEARZ] Or set UMP_IOS_POD_BIN to the pod executable."
+            exit 1
+        fi
+
+        POD_ARGS=(install)
+        if [ "${UMP_IOS_PODS_REPO_UPDATE:-0}" = "1" ]; then
+            POD_ARGS+=(--repo-update)
+        fi
+
+        (
+            cd "$IOS_PATH"
+            export LANG="${LANG:-en_US.UTF-8}"
+            export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+            "$POD_BIN" "${POD_ARGS[@]}"
+        )
+
+        if [ -d "$IOS_PATH/Unity-iPhone.xcworkspace" ]; then
+            WORKSPACE_FILE="$IOS_PATH/Unity-iPhone.xcworkspace"
+        else
+            WORKSPACE_FILE="$(find "$IOS_PATH" -maxdepth 1 -type d -name '*.xcworkspace' \
+                2>/dev/null | head -n 1 || true)"
+        fi
+    fi
+
+    if [ -z "$WORKSPACE_FILE" ] || [ ! -d "$WORKSPACE_FILE" ]; then
+        echo "[PEARZ] ERROR: Podfile exists but no .xcworkspace is available."
+        exit 1
+    fi
+
+    echo "[PEARZ] Workspace    : $WORKSPACE_FILE"
+fi
+
+XCODE_ARGS=(-project "$PROJECT")
+if [ -n "$WORKSPACE_FILE" ]; then
+    XCODE_ARGS=(-workspace "$WORKSPACE_FILE")
+fi
 
 NAME="Game"
-
 if [ -f "$INFO" ]; then
-
-    FROM_INFO="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' \
-        "$INFO" | tr -d '\r')"
-
+    FROM_INFO="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' "$INFO" | tr -d '\r')"
     [ -n "$FROM_INFO" ] && NAME="$FROM_INFO"
 fi
 
 ARCHIVE="$WORKSPACE/Builds/iOSArchive/$NAME.xcarchive"
-
-echo "[PEARZ] Project: $PROJECT"
-
 rm -rf "$WORKSPACE/Builds/iOSArchive" "$EXPORT"
 mkdir -p "$(dirname "$ARCHIVE")" "$EXPORT"
 
-cd "$IOS_PATH"
-
-# ------------------------------------------------------------
-# Scheme: IOS_SCHEME if provided, otherwise read it
-# from the generated Xcode project.
-# ------------------------------------------------------------
-
-# GameAssembly and UnityFramework are library schemes and
-# archive into something that cannot be exported as an ipa.
-
 SCHEME="${IOS_SCHEME:-}"
-
 if [ -z "$SCHEME" ]; then
+    SCHEMES="$(xcodebuild -list "${XCODE_ARGS[@]}" 2>/dev/null \
+        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {gsub(/^[ \t]+|[ \t]+$/, ""); print}')"
 
-    SCHEMES="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
-        | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {
-            gsub(/^[ \t]+|[ \t]+$/, ""); print }')"
-
-    if echo "$SCHEMES" | grep -qx "Unity-iPhone"; then
-
-        SCHEME="Unity-iPhone"
-
+    if echo "$SCHEMES" | grep -qx 'Unity-iPhone'; then
+        SCHEME='Unity-iPhone'
     else
-
         SCHEME="$(echo "$SCHEMES" \
-            | grep -vxE "GameAssembly|UnityFramework|Pods-.*" \
+            | grep -vxE 'GameAssembly|UnityFramework|Pods-.*' \
             | head -n 1 || true)"
     fi
 fi
 
-if [ -z "$SCHEME" ]; then
-    SCHEME="Unity-iPhone"
-fi
+[ -n "$SCHEME" ] || SCHEME='Unity-iPhone'
 
-echo "[PEARZ] Xcode scheme: $SCHEME"
+echo "[PEARZ] Project       : $PROJECT"
+if [ -n "$WORKSPACE_FILE" ]; then
+    echo "[PEARZ] Workspace     : $WORKSPACE_FILE"
+fi
+echo "[PEARZ] Xcode scheme  : $SCHEME"
+echo "[PEARZ] Archive       : $ARCHIVE"
 
 xcodebuild \
-    -project "$PROJECT" \
+    "${XCODE_ARGS[@]}" \
     -scheme "$SCHEME" \
     -configuration Release \
     -archivePath "$ARCHIVE" \
@@ -91,24 +175,13 @@ xcodebuild \
     -exportPath "$EXPORT" \
     -exportOptionsPlist "$OPTIONS"
 
-# ------------------------------------------------------------
-# Rename the IPA to ProductName-v1.0.0.ipa,
-# using the info written by JenkinsBuild.
-# ------------------------------------------------------------
-
-INFO="$WORKSPACE/Builds/ump_build_info.txt"
-
-IPA="$(find "$EXPORT" -maxdepth 2 -type f -name "*.ipa" | head -n 1 || true)"
-
+IPA="$(find "$EXPORT" -maxdepth 2 -type f -name '*.ipa' | head -n 1 || true)"
 if [ -n "$IPA" ] && [ -f "$INFO" ]; then
-
     NAME="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' "$INFO" | tr -d '\r')"
     VERSION="$(awk -F= '/^VERSION=/ {print $2; exit}' "$INFO" | tr -d '\r')"
 
     if [ -n "$NAME" ] && [ -n "$VERSION" ]; then
-
         TARGET="$(dirname "$IPA")/${NAME}-v${VERSION}.ipa"
-
         if [ "$IPA" != "$TARGET" ]; then
             mv "$IPA" "$TARGET"
             echo "[PEARZ] IPA: $TARGET"

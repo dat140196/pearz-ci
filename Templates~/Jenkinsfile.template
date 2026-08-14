@@ -534,31 +534,29 @@ pipeline {
         // GOOGLE DRIVE UPLOAD
         // ====================================================
 
-        // Android only: iOS ships through TestFlight / direct
-        // install, so no Drive copy is needed there.
+        // Android uploads its artifact (+ optional versioned BUILD_INFO).
+        // iOS uploads only the stable <GameName>_BUILD_INFO.txt into IOS/.
 
         stage('Drive Upload') {
-
             when {
                 expression {
                     env.BRANCH_NAME == 'release/android' ||
-                    env.BRANCH_NAME == 'release/android-test'
+                    env.BRANCH_NAME == 'release/android-test' ||
+                    env.BRANCH_NAME == 'release/ios-test' ||
+                    env.BRANCH_NAME == 'release/ios'
                 }
             }
 
             steps {
-
                 script {
-
-                    def artifact = ''
+                    def uploadFile = ''
+                    def buildInfoOnly = false
 
                     // ------------------------------------------------
                     // Android AAB
                     // ------------------------------------------------
-
                     if (env.BRANCH_NAME == 'release/android') {
-
-                        artifact = sh(
+                        uploadFile = sh(
                             script: '''
                                 find Builds/Android \
                                 -type f \
@@ -572,10 +570,8 @@ pipeline {
                     // ------------------------------------------------
                     // Android APK
                     // ------------------------------------------------
-
                     if (env.BRANCH_NAME == 'release/android-test') {
-
-                        artifact = sh(
+                        uploadFile = sh(
                             script: '''
                                 find Builds/AndroidTest \
                                 -type f \
@@ -587,57 +583,87 @@ pipeline {
                     }
 
                     // ------------------------------------------------
-                    // Upload
+                    // iOS: Drive receives BUILD_INFO only.
+                    // No .app / .ipa is uploaded here. Both iOS branches
+                    // overwrite the stable <GameName>_BUILD_INFO.txt in:
+                    //   <Drive root>/<Game name>/IOS/
                     // ------------------------------------------------
+                    if (env.BRANCH_NAME == 'release/ios-test' ||
+                        env.BRANCH_NAME == 'release/ios') {
 
-                    if (artifact && fileExists(artifact)) {
+                        buildInfoOnly = true
 
-                        echo "========================================"
-                        echo "[PEARZ] GOOGLE DRIVE UPLOAD"
-                        echo "[PEARZ] Artifact: ${artifact}"
-                        echo "========================================"
+                        uploadFile = sh(
+                            script: '''
+                                INFO="Builds/ump_build_info.txt"
+
+                                if [ ! -f "$INFO" ]; then
+                                    exit 0
+                                fi
+
+                                SAFE="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' \
+                                    "$INFO" | tr -d '\r')"
+
+                                if [ -z "$SAFE" ]; then
+                                    SAFE="Game"
+                                fi
+
+                                TARGET="Builds/${SAFE}_BUILD_INFO.txt"
+
+                                # New JenkinsBuild.cs writes this directly.
+                                # Keep this fallback so a generated project with
+                                # an older JenkinsBuild.cs can still upload info.
+                                if [ ! -f "$TARGET" ]; then
+                                    cp "$INFO" "$TARGET"
+                                fi
+
+                                printf '%s\n' "$TARGET"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                    }
+
+                    if (uploadFile && fileExists(uploadFile)) {
+                        echo '========================================'
+                        echo '[PEARZ] GOOGLE DRIVE UPLOAD'
+                        echo "[PEARZ] File: ${uploadFile}"
+                        if (buildInfoOnly) {
+                            echo '[PEARZ] Mode: iOS BUILD_INFO only'
+                            echo '[PEARZ] Drive: <Game name>/IOS/<GameName>_BUILD_INFO.txt'
+                        }
+                        echo '========================================'
 
                         try {
-
-                            // OAuth 2.0 user credentials. The refresh token lets
-                            // Jenkins obtain short-lived access tokens without an
-                            // interactive Google login on every build.
                             withCredentials([
-
                                 string(
                                     credentialsId:
                                         'UMP_DRIVE_OAUTH_CLIENT_ID',
                                     variable:
                                         'UMP_DRIVE_OAUTH_CLIENT_ID'
                                 ),
-
                                 string(
                                     credentialsId:
                                         'UMP_DRIVE_OAUTH_CLIENT_SECRET',
                                     variable:
                                         'UMP_DRIVE_OAUTH_CLIENT_SECRET'
                                 ),
-
                                 string(
                                     credentialsId:
                                         'UMP_DRIVE_OAUTH_REFRESH_TOKEN',
                                     variable:
                                         'UMP_DRIVE_OAUTH_REFRESH_TOKEN'
                                 ),
-
                                 string(
                                     credentialsId:
                                         'UMP_DRIVE_FOLDER_ID',
                                     variable:
                                         'UMP_DRIVE_FOLDER_ID'
                                 )
-
                             ]) {
-
                                 withEnv([
-                                    "PEARZ_ARTIFACT=${artifact}"
+                                    "PEARZ_ARTIFACT=${uploadFile}",
+                                    "UMP_DRIVE_BUILD_INFO_ONLY=${buildInfoOnly ? '1' : '0'}"
                                 ]) {
-
                                     sh '''
                                         chmod +x Jenkins/upload_drive.sh
                                         chmod +x Jenkins/upload_drive_impl.py
@@ -648,26 +674,24 @@ pipeline {
                                 }
                             }
 
-                            echo "========================================"
-                            echo "[PEARZ] Google Drive upload finished."
-                            echo "========================================"
+                            echo '========================================'
+                            echo '[PEARZ] Google Drive upload finished.'
+                            echo '========================================'
 
                         } catch (Exception e) {
-
-                            echo "========================================"
-                            echo "[PEARZ] Google Drive upload FAILED."
+                            echo '========================================'
+                            echo '[PEARZ] Google Drive upload FAILED.'
                             echo "[PEARZ] ${e.getMessage()}"
-                            echo "[PEARZ] Build will NOT fail because"
-                            echo "[PEARZ] Google Drive upload failed."
-                            echo "========================================"
+                            echo '[PEARZ] Build will NOT fail because'
+                            echo '[PEARZ] Google Drive upload failed.'
+                            echo '========================================'
                         }
 
                     } else {
-
-                        echo "========================================"
-                        echo "[PEARZ] No artifact found."
-                        echo "[PEARZ] Google Drive upload skipped."
-                        echo "========================================"
+                        echo '========================================'
+                        echo '[PEARZ] No Drive upload file found.'
+                        echo '[PEARZ] Google Drive upload skipped.'
+                        echo '========================================'
                     }
                 }
             }

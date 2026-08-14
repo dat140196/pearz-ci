@@ -21,6 +21,9 @@ set -euo pipefail
 #   UMP_IOS_TEAM_ID
 #   UMP_KEYCHAIN_PASSWORD
 #   UMP_IOS_LAUNCH=0
+#   UMP_IOS_POD_BIN=/path/to/pod
+#   UMP_IOS_AUTO_INSTALL_COCOAPODS=0  # do not auto-install via Homebrew
+#   UMP_IOS_PODS_REPO_UPDATE=1       # pass --repo-update to pod install
 #   UMP_ASC_KEY_PATH / UMP_ASC_KEY_ID / UMP_ASC_ISSUER_ID
 # ============================================================
 
@@ -62,10 +65,114 @@ if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
     exit 1
 fi
 
+IOS_PATH="$(dirname "$PROJECT")"
+PODFILE="$IOS_PATH/Podfile"
+WORKSPACE_FILE=""
+
+find_pod() {
+    if [ -n "${UMP_IOS_POD_BIN:-}" ] && [ -x "$UMP_IOS_POD_BIN" ]; then
+        printf '%s\n' "$UMP_IOS_POD_BIN"
+        return 0
+    fi
+    if command -v pod >/dev/null 2>&1; then
+        command -v pod
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/pod /usr/local/bin/pod; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_brew() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -f "$PODFILE" ]; then
+    # build_ios.sh normally ran pod install already, before capability
+    # cleanup. Reuse that workspace so CocoaPods cannot modify the project
+    # after strip_ios_iap.sh. The fallback below supports manual script use.
+    if [ -d "$IOS_PATH/Unity-iPhone.xcworkspace" ]; then
+        WORKSPACE_FILE="$IOS_PATH/Unity-iPhone.xcworkspace"
+    else
+        WORKSPACE_FILE="$(find "$IOS_PATH" -maxdepth 1 -type d -name '*.xcworkspace' \
+            2>/dev/null | head -n 1 || true)"
+    fi
+
+    if [ -z "$WORKSPACE_FILE" ]; then
+        echo "========================================"
+        echo "[PEARZ] CocoaPods fallback"
+        echo "[PEARZ] Podfile      : $PODFILE"
+        echo "========================================"
+
+        POD_BIN="$(find_pod || true)"
+
+        if [ -z "$POD_BIN" ] && [ "${UMP_IOS_AUTO_INSTALL_COCOAPODS:-1}" != "0" ]; then
+            BREW_BIN="$(find_brew || true)"
+            if [ -n "$BREW_BIN" ]; then
+                echo "[PEARZ] CocoaPods is missing. Installing with Homebrew..."
+                "$BREW_BIN" install cocoapods
+                POD_BIN="$(find_pod || true)"
+            fi
+        fi
+
+        if [ -z "$POD_BIN" ]; then
+            echo "[PEARZ] ERROR: Podfile exists but CocoaPods is not installed."
+            echo "[PEARZ] Install it once on the Jenkins Mac with: brew install cocoapods"
+            echo "[PEARZ] Or set UMP_IOS_POD_BIN to the pod executable."
+            exit 1
+        fi
+
+        POD_ARGS=(install)
+        if [ "${UMP_IOS_PODS_REPO_UPDATE:-0}" = "1" ]; then
+            POD_ARGS+=(--repo-update)
+        fi
+
+        (
+            cd "$IOS_PATH"
+            export LANG="${LANG:-en_US.UTF-8}"
+            export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+            "$POD_BIN" "${POD_ARGS[@]}"
+        )
+
+        if [ -d "$IOS_PATH/Unity-iPhone.xcworkspace" ]; then
+            WORKSPACE_FILE="$IOS_PATH/Unity-iPhone.xcworkspace"
+        else
+            WORKSPACE_FILE="$(find "$IOS_PATH" -maxdepth 1 -type d -name '*.xcworkspace' \
+                2>/dev/null | head -n 1 || true)"
+        fi
+    fi
+
+    if [ -z "$WORKSPACE_FILE" ] || [ ! -d "$WORKSPACE_FILE" ]; then
+        echo "[PEARZ] ERROR: Podfile exists but no .xcworkspace is available."
+        exit 1
+    fi
+
+    echo "[PEARZ] Workspace    : $WORKSPACE_FILE"
+fi
+
+XCODE_ARGS=(-project "$PROJECT")
+if [ -n "$WORKSPACE_FILE" ]; then
+    XCODE_ARGS=(-workspace "$WORKSPACE_FILE")
+fi
+
 SCHEME="${IOS_SCHEME:-Unity-iPhone}"
-if ! xcodebuild -list -project "$PROJECT" 2>/dev/null \
+if ! xcodebuild -list "${XCODE_ARGS[@]}" 2>/dev/null \
     | grep -q "^[[:space:]]*$SCHEME[[:space:]]*$"; then
-    SCHEMES="$(xcodebuild -list -project "$PROJECT" 2>/dev/null \
+    SCHEMES="$(xcodebuild -list "${XCODE_ARGS[@]}" 2>/dev/null \
         | awk '/Schemes:/ {found=1; next} found && !NF {exit} found {gsub(/^[ \t]+|[ \t]+$/, ""); print}')"
 
     if echo "$SCHEMES" | grep -qx "Unity-iPhone"; then
@@ -83,7 +190,7 @@ if [ -z "$SCHEME" ]; then
 fi
 
 SETTINGS="$(xcodebuild -showBuildSettings \
-    -project "$PROJECT" \
+    "${XCODE_ARGS[@]}" \
     -scheme "$SCHEME" \
     -configuration "$CONFIGURATION" \
     2>/dev/null || true)"
@@ -222,7 +329,7 @@ rm -rf "$DERIVED"
 mkdir -p "$DERIVED"
 
 BUILD_ARGS=(
-    -project "$PROJECT"
+    "${XCODE_ARGS[@]}"
     -scheme "$SCHEME"
     -configuration "$CONFIGURATION"
     -destination "id=$UDID"
