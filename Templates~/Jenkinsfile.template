@@ -640,7 +640,7 @@ pipeline {
                                 fi
 
                                 MATCHES="$(find "$IOS_ROOT" -maxdepth 1 -type f \
-                                    \( -name "${SAFE}*_BUILD_INFO.txt" -o -name "${SAFE}*BUILD*INFO.txt" \) \
+                                    \\( -name "${SAFE}*_BUILD_INFO.txt" -o -name "${SAFE}*BUILD*INFO.txt" \\) \
                                     ! -name 'ump_*' -print 2>/dev/null || true)"
 
                                 COUNT="$(printf '%s\n' "$MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
