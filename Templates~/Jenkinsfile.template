@@ -248,16 +248,32 @@ pipeline {
                         return
                     }
 
-                    sshagent(credentials: ['github-ssh']) {
+                    // Do not use sshagent{} here. Some Jenkins installations
+                    // do not have the SSH Agent plugin. The standard Credentials
+                    // Binding plugin already exposes sshUserPrivateKey, so use
+                    // the key file directly through GIT_SSH_COMMAND instead.
+                    withCredentials([
+                        sshUserPrivateKey(
+                            credentialsId: 'github-ssh',
+                            keyFileVariable: 'UMP_GITHUB_SSH_KEY',
+                            usernameVariable: 'UMP_GITHUB_SSH_USER'
+                        )
+                    ]) {
                         sh '''
                             set -e
 
                             echo "========================================"
                             echo "[PEARZ] GIT SUBMODULES"
                             echo "[PEARZ] Workspace : $WORKSPACE"
+                            echo "[PEARZ] Auth      : Jenkins SSH private key"
                             echo "========================================"
 
-                            export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new'
+                            chmod 600 "$UMP_GITHUB_SSH_KEY"
+
+                            # Force git/ssh to use the Jenkins credential key.
+                            # IdentitiesOnly prevents unrelated keys from the
+                            # build user's ssh-agent/keychain being attempted.
+                            export GIT_SSH_COMMAND="ssh -i $UMP_GITHUB_SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
                             git submodule sync --recursive
 

@@ -1,4 +1,4 @@
-# UMP Unity Mobile Pipeline 1.2.6
+# Pearz Unity Mobile Pipeline
 
 Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google Drive artifact upload, Telegram notifications, Android release signing, iOS device deployment, and SSH Git submodules.
 
@@ -7,7 +7,7 @@ Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google D
 Install with Unity Package Manager using **Add package from Git URL**:
 
 ```text
-https://github.com/dat140196/pearz-ci.git#1.2.6
+https://github.com/dat140196/pearz-ci.git#1.0.8
 ```
 
 Pin the package version/tag in `Packages/manifest.json` so Unity does not have to follow a moving Git revision on every build:
@@ -15,7 +15,7 @@ Pin the package version/tag in `Packages/manifest.json` so Unity does not have t
 ```json
 {
   "dependencies": {
-    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.2.6"
+    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.8"
   }
 }
 ```
@@ -75,6 +75,8 @@ Kind: SSH Username with private key
 ```
 
 The SSH key must be able to clone every private Git submodule used by the Unity project.
+
+The Jenkins **SSH Agent plugin is not required**. UMP binds the `github-ssh` private key with `sshUserPrivateKey` and passes it to Git through `GIT_SSH_COMMAND`.
 
 ### Android release signing (`release/android` only)
 
@@ -432,14 +434,15 @@ When upgrading UMP:
 ## Current version
 
 ```text
-UMP 1.2.6
+UMP 1.2.7
 ```
 
-Key changes through 1.2.6:
+Key changes through 1.2.7:
 
 ```text
 1.2.3  iOS device build: remove StoreKit.framework from Unity-iPhone only.
 1.2.4  Android signing: release keystore only on release/android AAB.
 1.2.5  Google Drive: OAuth 2.0 Client ID + refresh token, preserve overwrite/folder logic.
 1.2.6  Jenkins: initialize/update SSH Git submodules before Unity Package Manager runs.
+1.2.7  Jenkins: use sshUserPrivateKey + GIT_SSH_COMMAND for submodules; no SSH Agent plugin required.
 ```
