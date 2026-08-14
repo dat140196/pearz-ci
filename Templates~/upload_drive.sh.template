@@ -4,6 +4,8 @@ set -euo pipefail
 
 echo "========================================"
 echo "[PEARZ] Google Drive Upload"
+echo "[PEARZ] UMP        : @UMP_VERSION@"
+echo "[PEARZ] Auth       : OAuth 2.0 Client ID"
 echo "========================================"
 
 if [ "$#" -lt 1 ]; then
@@ -19,34 +21,23 @@ if [ ! -f "$ARTIFACT" ]; then
     exit 1
 fi
 
+required=(
+    UMP_DRIVE_OAUTH_CLIENT_ID
+    UMP_DRIVE_OAUTH_CLIENT_SECRET
+    UMP_DRIVE_OAUTH_REFRESH_TOKEN
+    UMP_DRIVE_FOLDER_ID
+)
+
+for name in "${required[@]}"; do
+    if [ -z "${!name:-}" ]; then
+        echo "[PEARZ] ERROR: $name is empty."
+        exit 1
+    fi
+done
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-HAS_SERVICE_ACCOUNT=0
-HAS_OAUTH=0
-
-if [ -n "${UMP_DRIVE_SERVICE_ACCOUNT_JSON:-}" ]; then
-    HAS_SERVICE_ACCOUNT=1
-fi
-
-if [ -n "${UMP_DRIVE_OAUTH_CLIENT_ID:-}" ] \
-    && [ -n "${UMP_DRIVE_OAUTH_CLIENT_SECRET:-}" ] \
-    && [ -n "${UMP_DRIVE_OAUTH_REFRESH_TOKEN:-}" ]; then
-    HAS_OAUTH=1
-fi
-
-if [ "$HAS_SERVICE_ACCOUNT" -eq 0 ] && [ "$HAS_OAUTH" -eq 0 ]; then
-    echo "[PEARZ] ERROR: no Drive credential."
-    echo "[PEARZ] Set UMP_DRIVE_SERVICE_ACCOUNT_JSON"
-    echo "[PEARZ] or the UMP_DRIVE_OAUTH_* variables."
-    exit 1
-fi
-
-if [ -z "${UMP_DRIVE_FOLDER_ID:-}" ]; then
-    echo "[PEARZ] ERROR: UMP_DRIVE_FOLDER_ID is empty."
-    exit 1
-fi
-
-echo "[PEARZ] Artifact: $ARTIFACT"
+echo "[PEARZ] Artifact   : $ARTIFACT"
 
 python3 "$SCRIPT_DIR/upload_drive_impl.py" "$ARTIFACT"
 

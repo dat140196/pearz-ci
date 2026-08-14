@@ -1,89 +1,86 @@
 // ============================================================
 // ANDROID BUILD + SIGNING
 //
-// Unity does not create a release keystore and does not keep
-// keystore passwords in the project.
+// Signing policy:
+//   release/android      -> AAB, release keystore REQUIRED
+//   release/android-test -> APK, custom keystore SKIPPED
 //
-// Default (recommended for several projects on one Jenkins):
-// no credential at all. Jenkins/resolve_keystore.sh picks the
-// keystore out of ~/.pearz/keystores by applicationIdentifier,
-// so a new project only means two more files on the Mac.
+// Only the Google Play AAB branch is allowed to bind Jenkins
+// keystore credentials. Test/other Android builds call the shell
+// directly; build_android.sh and JenkinsBuild.cs also enforce the
+// same rule so a global/stale env var cannot sign them by accident.
 //
-// Optional per-job override, e.g. one Jenkins folder per game:
-//   UMP_ANDROID_KEYSTORE          Secret file (.keystore / .jks)
-//   UMP_ANDROID_KEYSTORE_PASS     Secret text
-//   UMP_ANDROID_KEY_ALIAS         Secret text
-//   UMP_ANDROID_KEY_ALIAS_PASS    Secret text
-//
-// With neither, a test APK still builds with the Android debug
-// key; an AAB fails, because Google Play rejects debug signing.
+// release/android keystore lookup order:
+//   1. Optional Jenkins credentials:
+//      UMP_ANDROID_KEYSTORE
+//      UMP_ANDROID_KEYSTORE_PASS
+//      UMP_ANDROID_KEY_ALIAS
+//      UMP_ANDROID_KEY_ALIAS_PASS
+//   2. Project Keystores/ folder
+//   3. ~/.pearz/keystores (or UMP_KEYSTORE_HOME)
 // ============================================================
+
+def runAndroidBuild() {
+    sh '''
+        chmod +x Jenkins/find_unity.sh
+        chmod +x Jenkins/build_android.sh
+        ./Jenkins/build_android.sh
+    '''
+}
 
 def buildAndroid() {
 
-    def signed = true
+    // release/android-test must not even request Jenkins keystore
+    // credentials. It builds with Android debug/default signing.
+    if (env.BRANCH_NAME != 'release/android') {
+        echo '[PEARZ] Android keystore skipped - only release/android AAB uses it.'
+        runAndroidBuild()
+        return
+    }
 
-    // Probe first: a missing credential must not be confused with
-    // a failing Unity build.
+    def hasJenkinsKeystore = true
+
+    // Probe the optional Jenkins credential. If it is absent, the
+    // shell resolver will look in the project/machine keystore store.
     try {
-
         withCredentials([
             file(
                 credentialsId: 'UMP_ANDROID_KEYSTORE',
                 variable: 'UMP_KEYSTORE_PROBE'
             )
         ]) {
-            echo '[PEARZ] Android keystore credential found.'
+            echo '[PEARZ] Android release keystore credential found.'
         }
-
     } catch (Exception e) {
-
-        signed = false
-
-        echo '[PEARZ] No UMP_ANDROID_KEYSTORE credential.'
-        echo '[PEARZ] Falling back to the keystore store on this machine.'
+        hasJenkinsKeystore = false
+        echo '[PEARZ] No UMP_ANDROID_KEYSTORE Jenkins credential.'
+        echo '[PEARZ] release/android will use the keystore resolver.'
     }
 
-    if (!signed) {
-
-        sh '''
-            chmod +x Jenkins/find_unity.sh
-            chmod +x Jenkins/build_android.sh
-            ./Jenkins/build_android.sh
-        '''
-
+    if (!hasJenkinsKeystore) {
+        runAndroidBuild()
         return
     }
 
     withCredentials([
-
         file(
             credentialsId: 'UMP_ANDROID_KEYSTORE',
             variable: 'UMP_ANDROID_KEYSTORE'
         ),
-
         string(
             credentialsId: 'UMP_ANDROID_KEYSTORE_PASS',
             variable: 'UMP_ANDROID_KEYSTORE_PASS'
         ),
-
         string(
             credentialsId: 'UMP_ANDROID_KEY_ALIAS',
             variable: 'UMP_ANDROID_KEY_ALIAS'
         ),
-
         string(
             credentialsId: 'UMP_ANDROID_KEY_ALIAS_PASS',
             variable: 'UMP_ANDROID_KEY_ALIAS_PASS'
         )
-
     ]) {
-
-        sh '''
-            chmod +x Jenkins/find_unity.sh
-            chmod +x Jenkins/build_android.sh
-            ./Jenkins/build_android.sh
-        '''
+        runAndroidBuild()
     }
 }
 
@@ -466,13 +463,30 @@ pipeline {
 
                         try {
 
+                            // OAuth 2.0 user credentials. The refresh token lets
+                            // Jenkins obtain short-lived access tokens without an
+                            // interactive Google login on every build.
                             withCredentials([
 
                                 string(
                                     credentialsId:
-                                        'UMP_DRIVE_SERVICE_ACCOUNT_JSON',
+                                        'UMP_DRIVE_OAUTH_CLIENT_ID',
                                     variable:
-                                        'UMP_DRIVE_SERVICE_ACCOUNT_JSON'
+                                        'UMP_DRIVE_OAUTH_CLIENT_ID'
+                                ),
+
+                                string(
+                                    credentialsId:
+                                        'UMP_DRIVE_OAUTH_CLIENT_SECRET',
+                                    variable:
+                                        'UMP_DRIVE_OAUTH_CLIENT_SECRET'
+                                ),
+
+                                string(
+                                    credentialsId:
+                                        'UMP_DRIVE_OAUTH_REFRESH_TOKEN',
+                                    variable:
+                                        'UMP_DRIVE_OAUTH_REFRESH_TOKEN'
                                 ),
 
                                 string(

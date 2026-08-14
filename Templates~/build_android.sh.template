@@ -3,8 +3,8 @@ set -euo pipefail
 
 # ============================================================
 # PEARZ Android Build
-# release/android      -> AAB
-# release/android-test -> APK
+# release/android      -> AAB + release keystore REQUIRED
+# release/android-test -> APK + custom keystore SKIPPED
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -29,14 +29,33 @@ if [ -z "${WORKSPACE:-}" ]; then
 fi
 
 # ------------------------------------------------------------
-# Signing. Exports UMP_ANDROID_* from the Jenkins credential or
-# from the keystore store on this machine.
+# Signing policy
+#
+# ONLY release/android builds an AAB for Google Play and may
+# resolve/use the release keystore. Every other Android build
+# must ignore custom keystore credentials completely.
 # ------------------------------------------------------------
 
-. "$SCRIPT_DIR/resolve_keystore.sh"
+if [ "${BRANCH_NAME:-}" = "release/android" ]; then
+    echo "[PEARZ] Keystore   : required for release/android AAB"
 
-# The resolver may drop the passwords in a temp file.
-trap 'rm -f "${UMP_ANDROID_KEYSTORE_PROPS:-/dev/null}"' EXIT
+    # Exports UMP_ANDROID_* from Jenkins credentials, the project
+    # Keystores folder, or the machine keystore store.
+    . "$SCRIPT_DIR/resolve_keystore.sh"
+
+    # The resolver may drop the passwords in a temp file.
+    trap 'rm -f "${UMP_ANDROID_KEYSTORE_PROPS:-/dev/null}"' EXIT
+else
+    # Do not allow global Jenkins env vars or stale values to make
+    # an APK/test build accidentally use the production key.
+    unset UMP_ANDROID_KEYSTORE || true
+    unset UMP_ANDROID_KEYSTORE_PASS || true
+    unset UMP_ANDROID_KEY_ALIAS || true
+    unset UMP_ANDROID_KEY_ALIAS_PASS || true
+    unset UMP_ANDROID_KEYSTORE_PROPS || true
+
+    echo "[PEARZ] Keystore   : skipped (only release/android uses it)"
+fi
 
 # ------------------------------------------------------------
 # Android TEST
@@ -44,9 +63,9 @@ trap 'rm -f "${UMP_ANDROID_KEYSTORE_PROPS:-/dev/null}"' EXIT
 # ------------------------------------------------------------
 
 if [ "${BRANCH_NAME:-}" = "release/android-test" ]; then
-
     echo "========================================"
     echo "[PEARZ] Building Android APK"
+    echo "[PEARZ] Signing : Android debug/default signing"
     echo "========================================"
 
     "$UNITY_PATH" \
@@ -64,9 +83,9 @@ if [ "${BRANCH_NAME:-}" = "release/android-test" ]; then
 # ------------------------------------------------------------
 
 elif [ "${BRANCH_NAME:-}" = "release/android" ]; then
-
     echo "========================================"
     echo "[PEARZ] Building Android AAB"
+    echo "[PEARZ] Signing : release keystore required"
     echo "========================================"
 
     "$UNITY_PATH" \
@@ -77,13 +96,10 @@ elif [ "${BRANCH_NAME:-}" = "release/android" ]; then
         -buildTarget Android \
         -executeMethod JenkinsBuild.BuildAndroidAab \
         -logFile -
-
 else
-
     echo "[PEARZ] ERROR: Unsupported Android branch:"
     echo "${BRANCH_NAME:-<empty>}"
     exit 1
-
 fi
 
 echo "========================================"

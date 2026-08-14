@@ -1,72 +1,45 @@
 #!/usr/bin/env python3
+"""PEARZ / UMP Google Drive uploader using OAuth 2.0 user credentials.
 
-# ============================================================
-# PEARZ / UMP Google Drive upload
-#
-# Auth (choose ONE):
-#
-#   1. Service account  ->  UMP_DRIVE_SERVICE_ACCOUNT_JSON
-#      The destination folder MUST live in a Shared Drive
-#      ("Drive dùng chung"), because service accounts have
-#      NO storage quota of their own.
-#      Optional: UMP_DRIVE_IMPERSONATE_USER (domain-wide
-#      delegation) to upload as a real Workspace user, which
-#      also works for a normal My Drive folder.
-#
-#   2. OAuth refresh token (no Workspace / no Shared Drive)
-#      UMP_DRIVE_OAUTH_CLIENT_ID
-#      UMP_DRIVE_OAUTH_CLIENT_SECRET
-#      UMP_DRIVE_OAUTH_REFRESH_TOKEN
-#
-# Destination:
-#   UMP_DRIVE_FOLDER_ID   root folder / Shared Drive folder
-#
-#   Files are placed in  <root>/<Game name>/<APK|AAB>/file
-#   Game name comes from Builds/ump_build_info.txt (written by
-#   JenkinsBuild), or UMP_DRIVE_GAME_NAME, or JOB_NAME.
-#   UMP_DRIVE_SUBPATH overrides the whole sub path.
-#   UMP_DRIVE_SUBPATH="" uploads straight into the root folder.
-#
-#   A file with the same name in the same folder is overwritten
-#   (new revision, same id and link). Older duplicates left by
-#   previous builds are moved to the trash unless
-#   UMP_DRIVE_KEEP_DUPLICATES=1.
-# ============================================================
+Required environment variables:
+    UMP_DRIVE_OAUTH_CLIENT_ID
+    UMP_DRIVE_OAUTH_CLIENT_SECRET
+    UMP_DRIVE_OAUTH_REFRESH_TOKEN
+    UMP_DRIVE_FOLDER_ID
 
+Destination behavior is intentionally the same as the previous uploader:
+    <root>/<Game name>/<APK|AAB|IPA>/<artifact>
+
+- Missing folders are created automatically.
+- Same-name file in the same folder is UPDATED, not recreated. This keeps
+  the same Drive file id / shared link and creates a new revision.
+- Older same-name duplicates are trashed unless UMP_DRIVE_KEEP_DUPLICATES=1.
+- UMP_DRIVE_SUBPATH overrides the generated subpath; an explicitly empty
+  value uploads directly into UMP_DRIVE_FOLDER_ID.
+"""
+
+import json
 import os
 import sys
-import json
-import time
-import base64
-import tempfile
-import subprocess
-import urllib.request
-import urllib.parse
 import urllib.error
-
-
-SCOPE = "https://www.googleapis.com/auth/drive"
-
-CHUNK_SIZE = 8 * 1024 * 1024  # must stay a multiple of 256 KB
+import urllib.parse
+import urllib.request
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+DRIVE_API = "https://www.googleapis.com/drive/v3"
+DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
+FOLDER_MIME = "application/vnd.google-apps.folder"
+CHUNK_SIZE = 8 * 1024 * 1024  # Drive resumable chunks: multiple of 256 KiB.
 
 
 def log(message):
-    print("[PEARZ] " + message, flush=True)
-
-
-def b64(data):
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+    print("[PEARZ] " + str(message), flush=True)
 
 
 def opener():
-
-    # Google answers resumable chunks with 308, which urllib
-    # would otherwise try to follow as a redirect.
-
+    # Drive replies 308 Resume Incomplete between resumable upload chunks.
+    # urllib otherwise treats 308 as a redirect; keep it visible to the caller.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
-
         def redirect_request(self, *args, **kwargs):
             return None
 
@@ -74,836 +47,455 @@ def opener():
 
 
 def http(request):
-    return opener().open(request)
+    return opener().open(request, timeout=120)
 
 
-# ============================================================
-# AUTH
-# ============================================================
+def read_http_error(error):
+    try:
+        return error.read().decode(errors="replace")
+    except Exception:
+        return ""
 
-def sign_jwt(private_key, unsigned):
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        delete=True,
-        prefix="pearz-sa-",
-        suffix=".pem"
-    ) as key_file:
+def oauth_access_token():
+    client_id = os.environ.get("UMP_DRIVE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("UMP_DRIVE_OAUTH_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("UMP_DRIVE_OAUTH_REFRESH_TOKEN", "").strip()
 
-        key_file.write(private_key)
-        key_file.flush()
-
-        proc = subprocess.run(
-            [
-                "openssl",
-                "dgst",
-                "-sha256",
-                "-sign",
-                key_file.name
-            ],
-            input=unsigned,
-            capture_output=True
+    missing = [
+        name
+        for name, value in (
+            ("UMP_DRIVE_OAUTH_CLIENT_ID", client_id),
+            ("UMP_DRIVE_OAUTH_CLIENT_SECRET", client_secret),
+            ("UMP_DRIVE_OAUTH_REFRESH_TOKEN", refresh_token),
         )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError("Missing OAuth credential(s): " + ", ".join(missing))
 
-        if proc.returncode != 0:
-
-            raise RuntimeError(
-                "OpenSSL signing failed: " +
-                proc.stderr.decode(errors="replace")
-            )
-
-        return b64(proc.stdout)
-
-
-def token_from_service_account(service_account_json, subject):
-
-    # The Jenkins credential holds the JSON itself,
-    # not a path to a file.
-
-    sa = json.loads(service_account_json)
-
-    now = int(time.time())
-
-    token_uri = sa.get("token_uri", TOKEN_URI)
-
-    header = {
-        "alg": "RS256",
-        "typ": "JWT"
-    }
-
-    claim = {
-        "iss": sa["client_email"],
-        "scope": SCOPE,
-        "aud": token_uri,
-        "iat": now,
-        "exp": now + 3600
-    }
-
-    if subject:
-        claim["sub"] = subject
-
-    header_b64 = b64(
-        json.dumps(header, separators=(",", ":")).encode()
-    )
-
-    claim_b64 = b64(
-        json.dumps(claim, separators=(",", ":")).encode()
-    )
-
-    unsigned = (header_b64 + "." + claim_b64).encode()
-
-    assertion = (
-        header_b64 +
-        "." +
-        claim_b64 +
-        "." +
-        sign_jwt(sa["private_key"], unsigned)
-    )
-
-    body = urllib.parse.urlencode({
-
-        "grant_type":
-            "urn:ietf:params:oauth:grant-type:jwt-bearer",
-
-        "assertion":
-            assertion
-
-    }).encode()
-
-    request = urllib.request.Request(
-        token_uri,
-        data=body,
-        headers={
-            "Content-Type":
-                "application/x-www-form-urlencoded"
+    body = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
         }
-    )
-
-    log("Auth: service account " + sa["client_email"])
-
-    if subject:
-        log("Auth: impersonating " + subject)
-
-    with http(request) as response:
-        return json.loads(response.read().decode())["access_token"]
-
-
-def token_from_refresh_token(client_id, client_secret, refresh_token):
-
-    body = urllib.parse.urlencode({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token"
-    }).encode()
+    ).encode()
 
     request = urllib.request.Request(
         TOKEN_URI,
         data=body,
-        headers={
-            "Content-Type":
-                "application/x-www-form-urlencoded"
-        }
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
 
-    log("Auth: OAuth refresh token")
-
-    with http(request) as response:
-        return json.loads(response.read().decode())["access_token"]
-
-
-# ============================================================
-# DRIVE
-# ============================================================
-
-def folder_info(access_token, folder_id):
-
-    url = (
-        "https://www.googleapis.com/drive/v3/files/" +
-        urllib.parse.quote(folder_id) +
-        "?" +
-        urllib.parse.urlencode({
-            "fields": "id,name,mimeType,driveId",
-            "supportsAllDrives": "true"
-        })
-    )
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": "Bearer " + access_token
-        }
-    )
+    log("Auth: OAuth 2.0 refresh token")
 
     try:
+        with http(request) as response:
+            payload = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        detail = read_http_error(error)
+        raise RuntimeError(
+            "OAuth token refresh failed (HTTP %s): %s" % (error.code, detail)
+        ) from error
 
+    access_token = payload.get("access_token", "")
+    if not access_token:
+        raise RuntimeError("Google OAuth response did not contain access_token.")
+
+    return access_token
+
+
+def auth_headers(access_token, extra=None):
+    headers = {"Authorization": "Bearer " + access_token}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def folder_id_from_value(value):
+    value = (value or "").strip()
+    if "/folders/" in value:
+        value = value.split("/folders/", 1)[1]
+        value = value.split("?", 1)[0].split("/", 1)[0]
+    return value
+
+
+def folder_info(access_token, folder_id):
+    url = DRIVE_API + "/files/" + urllib.parse.quote(folder_id) + "?" + urllib.parse.urlencode(
+        {"fields": "id,name,mimeType,driveId", "supportsAllDrives": "true"}
+    )
+    request = urllib.request.Request(url, headers=auth_headers(access_token))
+
+    try:
         with http(request) as response:
             return json.loads(response.read().decode())
-
-    except urllib.error.HTTPError as e:
-
-        log(
-            "WARNING: cannot read destination folder "
-            "(HTTP " + str(e.code) + "). "
-            "Make sure the folder is shared with the "
-            "upload identity."
-        )
-
-        return None
+    except urllib.error.HTTPError as error:
+        detail = read_http_error(error)
+        raise RuntimeError(
+            "Cannot read UMP_DRIVE_FOLDER_ID (HTTP %s): %s" % (error.code, detail)
+        ) from error
 
 
 def escape_query(value):
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def find_folder(access_token, parent_id, name):
+def list_files(access_token, query, fields, order_by=None, page_size=100):
+    params = {
+        "q": query,
+        "fields": "files(" + fields + ")",
+        "pageSize": str(page_size),
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+        "corpora": "allDrives",
+    }
+    if order_by:
+        params["orderBy"] = order_by
 
-    query = (
-        "name = '" + escape_query(name) + "' and "
-        "mimeType = 'application/vnd.google-apps.folder' and "
-        "'" + escape_query(parent_id) + "' in parents and "
-        "trashed = false"
-    )
-
-    url = (
-        "https://www.googleapis.com/drive/v3/files?" +
-        urllib.parse.urlencode({
-            "q": query,
-            "fields": "files(id,name)",
-            "pageSize": "10",
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-            "corpora": "allDrives"
-        })
-    )
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": "Bearer " + access_token
-        }
-    )
-
+    url = DRIVE_API + "/files?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers=auth_headers(access_token))
     with http(request) as response:
+        return json.loads(response.read().decode()).get("files", [])
 
-        files = json.loads(response.read().decode()).get("files", [])
 
+def find_folder(access_token, parent_id, name):
+    query = (
+        "name = '%s' and mimeType = '%s' and '%s' in parents and trashed = false"
+        % (escape_query(name), FOLDER_MIME, escape_query(parent_id))
+    )
+    files = list_files(access_token, query, "id,name", page_size=10)
     return files[0]["id"] if files else None
 
 
 def create_folder(access_token, parent_id, name):
-
-    metadata = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id]
-    }
-
-    url = (
-        "https://www.googleapis.com/drive/v3/files?" +
-        urllib.parse.urlencode({
-            "fields": "id,name",
-            "supportsAllDrives": "true"
-        })
+    metadata = {"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]}
+    url = DRIVE_API + "/files?" + urllib.parse.urlencode(
+        {"fields": "id,name", "supportsAllDrives": "true"}
     )
-
     request = urllib.request.Request(
         url,
         data=json.dumps(metadata).encode(),
         method="POST",
-        headers={
-
-            "Authorization":
-                "Bearer " + access_token,
-
-            "Content-Type":
-                "application/json; charset=UTF-8"
-        }
+        headers=auth_headers(
+            access_token, {"Content-Type": "application/json; charset=UTF-8"}
+        ),
     )
-
     with http(request) as response:
         return json.loads(response.read().decode())["id"]
 
 
 def resolve_folder(access_token, root_id, sub_path):
-
     folder_id = root_id
-
-    for name in [p.strip() for p in sub_path.split("/") if p.strip()]:
-
+    for name in [part.strip() for part in sub_path.split("/") if part.strip()]:
         existing = find_folder(access_token, folder_id, name)
-
         if existing:
-
-            log("Drive folder: " + name + " (existing)")
-
+            log("Drive folder: %s (existing)" % name)
             folder_id = existing
-
         else:
-
             folder_id = create_folder(access_token, folder_id, name)
-
-            log("Drive folder: " + name + " (created)")
-
+            log("Drive folder: %s (created)" % name)
     return folder_id
 
 
-def quota_help(using_service_account, info):
-
-    print("")
-    log("HOW TO FIX")
-    log("Service accounts have no Drive storage quota, so")
-    log("they cannot own files in a personal My Drive folder.")
-    print("")
-    log("Option 1 (recommended) - Shared Drive:")
-    log("  1. Google Drive -> Shared drives -> create a drive")
-    log("  2. Add the service-account email as Content manager")
-    log("  3. Create the destination folder inside that drive")
-    log("  4. Put that folder ID in UMP_DRIVE_FOLDER_ID")
-    print("")
-    log("Option 2 - Workspace domain-wide delegation:")
-    log("  Authorize the service-account client ID for scope")
-    log("  " + SCOPE + " in the Admin console, then set")
-    log("  UMP_DRIVE_IMPERSONATE_USER=user@yourdomain.com")
-    print("")
-    log("Option 3 - personal Gmail (no Workspace):")
-    log("  Use an OAuth client and set")
-    log("  UMP_DRIVE_OAUTH_CLIENT_ID,")
-    log("  UMP_DRIVE_OAUTH_CLIENT_SECRET,")
-    log("  UMP_DRIVE_OAUTH_REFRESH_TOKEN")
-    print("")
-
-    if using_service_account and info is not None and not info.get("driveId"):
-
-        log(
-            "Detected: folder '" + str(info.get("name")) +
-            "' is NOT in a Shared Drive."
-        )
-
-
-def find_files(access_token, folder_id, name):
-
+def find_same_name_files(access_token, folder_id, file_name):
     query = (
-        "name = '" + escape_query(name) + "' and "
-        "'" + escape_query(folder_id) + "' in parents and "
-        "trashed = false"
+        "name = '%s' and '%s' in parents and trashed = false"
+        % (escape_query(file_name), escape_query(folder_id))
     )
-
-    url = (
-        "https://www.googleapis.com/drive/v3/files?" +
-        urllib.parse.urlencode({
-            "q": query,
-            "fields": "files(id,name,modifiedTime)",
-            "orderBy": "modifiedTime desc",
-            "pageSize": "100",
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-            "corpora": "allDrives"
-        })
+    return list_files(
+        access_token,
+        query,
+        "id,name,modifiedTime",
+        order_by="modifiedTime desc",
+        page_size=100,
     )
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": "Bearer " + access_token
-        }
-    )
-
-    try:
-
-        with http(request) as response:
-            return json.loads(response.read().decode()).get("files", [])
-
-    except urllib.error.HTTPError as e:
-
-        log(
-            "WARNING: cannot list existing files "
-            "(HTTP " + str(e.code) + "). Uploading as a new file."
-        )
-
-        return []
 
 
 def trash_file(access_token, file_id):
-
-    url = (
-        "https://www.googleapis.com/drive/v3/files/" +
-        urllib.parse.quote(file_id) +
-        "?" +
-        urllib.parse.urlencode({"supportsAllDrives": "true"})
+    url = DRIVE_API + "/files/" + urllib.parse.quote(file_id) + "?" + urllib.parse.urlencode(
+        {"supportsAllDrives": "true"}
     )
-
     request = urllib.request.Request(
         url,
         data=json.dumps({"trashed": True}).encode(),
         method="PATCH",
-        headers={
-
-            "Authorization":
-                "Bearer " + access_token,
-
-            "Content-Type":
-                "application/json; charset=UTF-8"
-        }
+        headers=auth_headers(
+            access_token, {"Content-Type": "application/json; charset=UTF-8"}
+        ),
     )
-
     with http(request) as response:
         response.read()
 
 
-# Same name in the same folder = same build. Overwrite it instead of
-# piling up copies; the Drive link stays valid for whoever has it.
-def replace_target(access_token, folder_id, file_name):
-
-    existing = find_files(access_token, folder_id, file_name)
-
+def replacement_target(access_token, folder_id, file_name):
+    existing = find_same_name_files(access_token, folder_id, file_name)
     if not existing:
         return None
 
-    target = existing[0]["id"]
-
-    log("Existing file found - uploading a new revision.")
+    # Most recently modified copy is the canonical one. PATCHing it uploads a
+    # new revision while preserving file id and any shared link.
+    target_id = existing[0]["id"]
+    log("Existing file found - uploading a new revision (same file id).")
+    log("Existing File ID: " + target_id)
 
     extras = existing[1:]
-
     if not extras:
-        return target
+        return target_id
 
     if os.environ.get("UMP_DRIVE_KEEP_DUPLICATES", "").strip() == "1":
-
-        log(
-            "Leaving " + str(len(extras)) +
-            " older duplicate(s) in place."
-        )
-
-        return target
+        log("Leaving %d older duplicate(s) in place." % len(extras))
+        return target_id
 
     for duplicate in extras:
-
         try:
-
             trash_file(access_token, duplicate["id"])
-
             log("Moved older duplicate to trash: " + duplicate["id"])
-
-        except urllib.error.HTTPError as e:
-
+        except urllib.error.HTTPError as error:
             log(
-                "WARNING: cannot trash duplicate " +
-                duplicate["id"] + " (HTTP " + str(e.code) + ")."
+                "WARNING: cannot trash duplicate %s (HTTP %s)."
+                % (duplicate["id"], error.code)
             )
 
-    return target
+    return target_id
 
 
-def start_session(access_token, folder_id, file_name, file_size, file_id):
-
+def start_resumable_session(access_token, folder_id, file_name, file_size, file_id):
     if file_id:
-
-        # Updating keeps the same file id, so the shared link and
-        # the Drive history survive.
         metadata = {"name": file_name}
-
         url = (
-            "https://www.googleapis.com/upload/drive/v3/files/" +
-            urllib.parse.quote(file_id) + "?" +
-            urllib.parse.urlencode({
-                "uploadType": "resumable",
-                "supportsAllDrives": "true",
-                "fields": "id,name,webViewLink"
-            })
+            DRIVE_UPLOAD_API
+            + "/files/"
+            + urllib.parse.quote(file_id)
+            + "?"
+            + urllib.parse.urlencode(
+                {
+                    "uploadType": "resumable",
+                    "supportsAllDrives": "true",
+                    "fields": "id,name,webViewLink",
+                }
+            )
         )
-
         method = "PATCH"
-
     else:
-
-        metadata = {
-            "name": file_name,
-            "parents": [folder_id]
-        }
-
-        url = (
-            "https://www.googleapis.com/upload/drive/v3/files?" +
-            urllib.parse.urlencode({
+        metadata = {"name": file_name, "parents": [folder_id]}
+        url = DRIVE_UPLOAD_API + "/files?" + urllib.parse.urlencode(
+            {
                 "uploadType": "resumable",
                 "supportsAllDrives": "true",
-                "fields": "id,name,webViewLink"
-            })
+                "fields": "id,name,webViewLink",
+            }
         )
-
         method = "POST"
 
     request = urllib.request.Request(
         url,
         data=json.dumps(metadata).encode(),
         method=method,
-        headers={
-
-            "Authorization":
-                "Bearer " + access_token,
-
-            "Content-Type":
-                "application/json; charset=UTF-8",
-
-            "X-Upload-Content-Type":
-                "application/octet-stream",
-
-            "X-Upload-Content-Length":
-                str(file_size)
-        }
+        headers=auth_headers(
+            access_token,
+            {
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": "application/octet-stream",
+                "X-Upload-Content-Length": str(file_size),
+            },
+        ),
     )
 
     with http(request) as response:
-
         location = response.headers.get("Location")
 
-        if not location:
-
-            raise RuntimeError(
-                "Drive did not return a resumable session URI."
-            )
-
-        return location
+    if not location:
+        raise RuntimeError("Drive did not return a resumable session URI.")
+    return location
 
 
 def send_chunks(session_uri, access_token, file_path, file_size):
-
     sent = 0
+    result = {}
 
-    with open(file_path, "rb") as f:
-
+    with open(file_path, "rb") as stream:
         while sent < file_size:
-
-            chunk = f.read(CHUNK_SIZE)
-
+            chunk = stream.read(CHUNK_SIZE)
             if not chunk:
                 break
 
             last = sent + len(chunk) - 1
-
             request = urllib.request.Request(
                 session_uri,
                 data=chunk,
                 method="PUT",
-                headers={
-
-                    "Authorization":
-                        "Bearer " + access_token,
-
-                    "Content-Length":
-                        str(len(chunk)),
-
-                    "Content-Range":
-                        "bytes " +
-                        str(sent) + "-" + str(last) +
-                        "/" + str(file_size)
-                }
+                headers=auth_headers(
+                    access_token,
+                    {
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": "bytes %d-%d/%d" % (sent, last, file_size),
+                    },
+                ),
             )
 
             try:
-
                 with http(request) as response:
-
                     body = response.read().decode(errors="replace")
-
-                    percent = int((last + 1) * 100 / file_size)
-
-                    log("Upload " + str(percent) + "% - done")
-
-                    return json.loads(body) if body else {}
-
-            except urllib.error.HTTPError as e:
-
-                if e.code != 308:
+                    result = json.loads(body) if body else {}
+                    sent = last + 1
+                    log("Upload 100% - done")
+                    break
+            except urllib.error.HTTPError as error:
+                if error.code != 308:
                     raise
 
-                # 308 = chunk accepted, keep going.
-
-                sent = last + 1
+                # Google accepted the chunk and expects the next range.
+                range_header = error.headers.get("Range", "") if error.headers else ""
+                if range_header and "-" in range_header:
+                    try:
+                        sent = int(range_header.rsplit("-", 1)[1]) + 1
+                        stream.seek(sent)
+                    except ValueError:
+                        sent = last + 1
+                else:
+                    sent = last + 1
 
                 percent = int(sent * 100 / file_size)
+                log("Upload %d%%" % percent)
 
-                log("Upload " + str(percent) + "%")
-
-    return {}
+    return result
 
 
-def upload(access_token, folder_id, file_path, using_service_account, info):
-
-    file_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
-
-    log("Uploading to Google Drive: " + file_name)
-    log("File size: " + str(file_size) + " bytes")
-
-    try:
-
-        session_uri = start_session(
-            access_token,
-            folder_id,
-            file_name,
-            file_size,
-            replace_target(access_token, folder_id, file_name)
-        )
-
-        result = send_chunks(
-            session_uri,
-            access_token,
-            file_path,
-            file_size
-        )
-
-    except urllib.error.HTTPError as e:
-
-        error_body = e.read().decode(errors="replace")
-
-        log("Google Drive API ERROR (HTTP " + str(e.code) + "):")
-
-        print(error_body)
-
-        if "storageQuotaExceeded" in error_body:
-            quota_help(using_service_account, info)
-
-        raise
-
+def write_drive_url(result, file_path):
     file_id = result.get("id", "")
+    file_name = result.get("name", os.path.basename(file_path))
+    url = result.get("webViewLink") or (
+        "https://drive.google.com/file/d/" + file_id + "/view" if file_id else ""
+    )
 
     log("Google Drive upload SUCCESS.")
     log("File ID: " + (file_id or "unknown"))
-    log("File name: " + result.get("name", file_name))
+    log("File name: " + file_name)
+    log("Drive URL: " + (url or "unknown"))
 
-    url = (
-        result.get("webViewLink") or
-        "https://drive.google.com/file/d/" + file_id + "/view"
-    )
-
-    log("Drive URL: " + url)
-
-    # The Telegram notification runs in a later step, in another
-    # process, so the link is left where it can pick it up. The
-    # artifact name goes with it: the workspace survives between
-    # builds and a stale link must not be reported as this one.
-    url_path = os.environ.get(
-        "UMP_DRIVE_URL_FILE",
-        "Builds/ump_drive_url.txt"
-    )
-
+    url_path = os.environ.get("UMP_DRIVE_URL_FILE", "Builds/ump_drive_url.txt")
     try:
-
         directory = os.path.dirname(url_path)
-
         if directory:
             os.makedirs(directory, exist_ok=True)
+        with open(url_path, "w", encoding="utf-8") as output:
+            output.write("url=" + url + "\n")
+            output.write("artifact=" + os.path.basename(file_path) + "\n")
+    except Exception as error:
+        log("WARNING: could not write %s: %s" % (url_path, error))
 
-        with open(url_path, "w") as f:
-            f.write("url=" + url + "\n")
-            f.write("artifact=" + os.path.basename(file_path) + "\n")
-
-    except Exception as e:
-
-        log("Could not write " + url_path + ": " + str(e))
-
-
-# ============================================================
-# ENTRY
-# ============================================================
 
 def build_info():
-
-    path = os.environ.get(
-        "UMP_BUILD_INFO",
-        "Builds/ump_build_info.txt"
-    )
-
+    path = os.environ.get("UMP_BUILD_INFO", "Builds/ump_build_info.txt")
     values = {}
-
     if not os.path.isfile(path):
         return values
 
-    with open(path, "r") as f:
-
-        for line in f:
-
-            line = line.strip()
-
+    with open(path, "r", encoding="utf-8") as stream:
+        for raw in stream:
+            line = raw.strip()
             if not line or "=" not in line:
                 continue
-
             key, value = line.split("=", 1)
-
             values[key.strip()] = value.strip()
-
     return values
 
 
 def game_name(info):
-
     name = os.environ.get("UMP_DRIVE_GAME_NAME", "").strip()
-
     if name:
         return name
 
     name = info.get("PRODUCT_NAME", "").strip()
-
     if name:
         return name
 
-    # Multibranch job names look like "MeowPuzzle/release%2Fandroid".
-
     job = os.environ.get("JOB_NAME", "").strip()
-
     return job.split("/")[0] if job else ""
 
 
 def sub_path(file_path):
-
-    # An explicit value always wins, including an empty one
-    # (upload straight into the root folder).
-
     if "UMP_DRIVE_SUBPATH" in os.environ:
         return os.environ["UMP_DRIVE_SUBPATH"].strip()
 
-    kinds = {
-        ".apk": "APK",
-        ".aab": "AAB",
-        ".ipa": "IPA"
-    }
-
+    kinds = {".apk": "APK", ".aab": "AAB", ".ipa": "IPA"}
     kind = kinds.get(os.path.splitext(file_path)[1].lower(), "")
-
-    parts = [p for p in [game_name(build_info()), kind] if p]
-
+    parts = [part for part in (game_name(build_info()), kind) if part]
     return "/".join(parts)
 
 
-def resolve_token():
+def upload(access_token, folder_id, file_path):
+    file_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    if file_size <= 0:
+        raise RuntimeError("Artifact is empty: " + file_path)
 
-    client_id = os.environ.get("UMP_DRIVE_OAUTH_CLIENT_ID", "").strip()
+    log("Uploading to Google Drive: " + file_name)
+    log("File size: %d bytes" % file_size)
 
-    client_secret = os.environ.get(
-        "UMP_DRIVE_OAUTH_CLIENT_SECRET", ""
-    ).strip()
+    target_id = replacement_target(access_token, folder_id, file_name)
+    session_uri = start_resumable_session(
+        access_token, folder_id, file_name, file_size, target_id
+    )
+    result = send_chunks(session_uri, access_token, file_path, file_size)
+    write_drive_url(result, file_path)
 
-    refresh_token = os.environ.get(
-        "UMP_DRIVE_OAUTH_REFRESH_TOKEN", ""
-    ).strip()
 
-    if client_id and client_secret and refresh_token:
+def main():
+    if len(sys.argv) < 2:
+        raise RuntimeError("Missing artifact path.")
 
-        return token_from_refresh_token(
-            client_id,
-            client_secret,
-            refresh_token
-        ), False
+    artifact = sys.argv[1]
+    if not os.path.isfile(artifact):
+        raise RuntimeError("Artifact not found: " + artifact)
 
-    service_account_json = os.environ.get(
-        "UMP_DRIVE_SERVICE_ACCOUNT_JSON", ""
-    ).strip()
+    root_id = folder_id_from_value(os.environ.get("UMP_DRIVE_FOLDER_ID", ""))
+    if not root_id:
+        raise RuntimeError("UMP_DRIVE_FOLDER_ID is empty.")
 
-    if not service_account_json:
+    access_token = oauth_access_token()
+    info = folder_info(access_token, root_id)
+    if info.get("mimeType") != FOLDER_MIME:
+        raise RuntimeError("UMP_DRIVE_FOLDER_ID is not a Google Drive folder.")
 
-        log(
-            "ERROR: no Drive credential. Set "
-            "UMP_DRIVE_SERVICE_ACCOUNT_JSON or the "
-            "UMP_DRIVE_OAUTH_* variables."
+    log(
+        "Root folder: %s%s"
+        % (
+            info.get("name", root_id),
+            " (Shared Drive)" if info.get("driveId") else " (My Drive)",
         )
+    )
 
-        sys.exit(1)
+    target_folder = root_id
+    path = sub_path(artifact)
+    if path:
+        log("Drive path: " + path)
+        try:
+            target_folder = resolve_folder(access_token, root_id, path)
+        except urllib.error.HTTPError as error:
+            detail = read_http_error(error)
+            log(
+                "WARNING: cannot create/resolve '%s' (HTTP %s). "
+                "Uploading into root folder instead. %s"
+                % (path, error.code, detail)
+            )
+            target_folder = root_id
 
-    # Accept a path to the JSON as well as the JSON itself.
-
-    if os.path.isfile(service_account_json):
-
-        with open(service_account_json, "r") as f:
-            service_account_json = f.read()
-
-    subject = os.environ.get(
-        "UMP_DRIVE_IMPERSONATE_USER", ""
-    ).strip()
-
-    return token_from_service_account(
-        service_account_json,
-        subject
-    ), True
+    upload(access_token, target_folder, artifact)
 
 
 if __name__ == "__main__":
-
-    if len(sys.argv) < 2:
-
-        log("ERROR: missing artifact path.")
+    try:
+        main()
+    except urllib.error.HTTPError as error:
+        detail = read_http_error(error)
+        log("Google Drive API ERROR (HTTP %s):" % error.code)
+        if detail:
+            print(detail, flush=True)
         sys.exit(1)
-
-    artifact = sys.argv[1]
-
-    folder_id = os.environ.get("UMP_DRIVE_FOLDER_ID", "").strip()
-
-    # Accept a pasted folder URL, not only the raw ID.
-
-    if "/folders/" in folder_id:
-
-        folder_id = folder_id.split("/folders/")[1]
-        folder_id = folder_id.split("?")[0].split("/")[0]
-
-    if not folder_id:
-
-        log("ERROR: UMP_DRIVE_FOLDER_ID is empty.")
+    except Exception as error:
+        log("ERROR: " + str(error))
         sys.exit(1)
-
-    if not os.path.isfile(artifact):
-
-        log("ERROR: Artifact not found: " + artifact)
-        sys.exit(1)
-
-    access_token, using_service_account = resolve_token()
-
-    info = folder_info(access_token, folder_id)
-
-    if info is not None:
-
-        log(
-            "Root folder: " + str(info.get("name")) +
-            (
-                " (Shared Drive)"
-                if info.get("driveId")
-                else " (My Drive)"
-            )
-        )
-
-        if using_service_account and not info.get("driveId"):
-
-            log(
-                "WARNING: folder is not in a Shared Drive - "
-                "a service account cannot own files there."
-            )
-
-    target = folder_id
-
-    path = sub_path(artifact)
-
-    if path:
-
-        log("Drive path: " + path)
-
-        try:
-
-            target = resolve_folder(access_token, folder_id, path)
-
-        except urllib.error.HTTPError as e:
-
-            log(
-                "WARNING: cannot create '" + path + "' "
-                "(HTTP " + str(e.code) + "). "
-                "Uploading into the root folder instead."
-            )
-
-            target = folder_id
-
-    upload(
-        access_token,
-        target,
-        artifact,
-        using_service_account,
-        info
-    )
