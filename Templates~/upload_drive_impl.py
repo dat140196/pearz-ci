@@ -475,49 +475,37 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
-    # The Unity project plugin owns BUILD_INFO. CI must only discover it.
-    # Android output directories are cleaned before each build, so an exact
-    # artifact-stem match is authoritative and safest.
+    # The Unity project's build-info plugin owns BUILD_INFO. CI must only
+    # discover an existing file; it never creates, renames, or rewrites it.
+    # Android builds and iOS exports can use different product prefixes, so
+    # the filename is intentionally discovered from the artifact directory
+    # instead of being derived from PRODUCT_NAME or the artifact stem.
     artifact = os.path.abspath(artifact)
     artifact_dir = os.path.dirname(artifact) or "."
-    artifact_stem = os.path.splitext(os.path.basename(artifact))[0]
 
-    if not artifact_stem or not os.path.isdir(artifact_dir):
+    if not os.path.isdir(artifact_dir):
         return ""
 
-    exact = os.path.join(artifact_dir, artifact_stem + "_BUILD_INFO.txt")
-    if os.path.isfile(exact):
-        return exact
-
-    product = (
-        info.get("PRODUCT_NAME_SAFE", "").strip()
-        or safe_file_part(info.get("PRODUCT_NAME", ""))
-        or safe_file_part(game_name(info))
-    )
-
-    patterns = []
-    if product:
-        patterns.extend([
-            os.path.join(artifact_dir, product + "*_BUILD_INFO.txt"),
-            os.path.join(artifact_dir, product + "*BUILD*INFO.txt"),
-        ])
-
     matches = []
-    for pattern in patterns:
-        for candidate in glob.glob(pattern):
-            if not os.path.isfile(candidate):
+    try:
+        for name in os.listdir(artifact_dir):
+            lower = name.lower()
+            if not lower.endswith("_build_info.txt"):
                 continue
-            if os.path.basename(candidate).startswith("ump_"):
+            if lower.startswith("ump_"):
                 continue
-            if candidate not in matches:
+            candidate = os.path.join(artifact_dir, name)
+            if os.path.isfile(candidate):
                 matches.append(candidate)
+    except OSError:
+        return ""
 
     if len(matches) == 1:
         return matches[0]
 
     if len(matches) > 1:
         raise RuntimeError(
-            "Multiple plugin BUILD_INFO files match artifact %s: %s"
+            "Multiple plugin BUILD_INFO files found beside artifact %s: %s"
             % (artifact, ", ".join(sorted(matches)))
         )
 
@@ -590,7 +578,7 @@ def main():
     )
 
     if build_info_only:
-        if not os.path.basename(artifact).endswith("_BUILD_INFO.txt"):
+        if not os.path.basename(artifact).lower().endswith("_build_info.txt"):
             raise RuntimeError(
                 "UMP_DRIVE_BUILD_INFO_ONLY requires a *_BUILD_INFO.txt file: "
                 + artifact

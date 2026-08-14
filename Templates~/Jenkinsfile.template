@@ -617,31 +617,28 @@ pipeline {
                                     exit 0
                                 fi
 
-                                SAFE="$(awk -F= '/^PRODUCT_NAME_SAFE=/ {print $2; exit}' \
-                                    "$INFO" | tr -d '\r')"
                                 EXPORT_DIR="$(awk -F= '/^ARTIFACT=/ {print substr($0, index($0, "=") + 1); exit}' \
                                     "$INFO" | tr -d '\r')"
 
-                                if [ -z "$SAFE" ] || [ -z "$EXPORT_DIR" ]; then
+                                if [ -z "$EXPORT_DIR" ]; then
                                     exit 0
                                 fi
 
                                 IOS_ROOT="$(dirname "$EXPORT_DIR")"
-                                EXACT="${IOS_ROOT}/${SAFE}_BUILD_INFO.txt"
 
-                                # The project plugin owns BUILD_INFO. Prefer the
-                                # stable iOS name first, then allow exactly one
-                                # plugin-generated variant such as:
-                                #   <Game>_<anything>_BUILD_INFO.txt
-                                # CI never creates, copies, edits, or deletes it.
-                                if [ -f "$EXACT" ]; then
-                                    printf '%s\n' "$EXACT"
-                                    exit 0
-                                fi
-
+                                # The Unity project's build-info plugin owns this file.
+                                # Unity can generate different product prefixes for Android
+                                # and iOS, so CI deliberately does not derive the filename
+                                # from PRODUCT_NAME or the exported Xcode project name.
+                                # Find exactly one real BUILD_INFO file in the current
+                                # export directory, accepting both common casings:
+                                #   <name>_build_info.txt
+                                #   <name>_BUILD_INFO.txt
+                                # and other case variants of the same suffix.
                                 MATCHES="$(find "$IOS_ROOT" -maxdepth 1 -type f \
-                                    \\( -name "${SAFE}*_BUILD_INFO.txt" -o -name "${SAFE}*BUILD*INFO.txt" \\) \
-                                    ! -name 'ump_*' -print 2>/dev/null || true)"
+                                    -iname '*_build_info.txt' \
+                                    ! -iname 'ump_*' \
+                                    -print 2>/dev/null || true)"
 
                                 COUNT="$(printf '%s\n' "$MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
 
