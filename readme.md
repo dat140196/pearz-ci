@@ -1,226 +1,445 @@
-# UMP Unity Mobile Pipeline
+# UMP Unity Mobile Pipeline 1.2.6
 
-Install using Unity Package Manager -> Add package from Git URL.
+Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google Drive artifact upload, Telegram notifications, Android release signing, iOS device deployment, and SSH Git submodules.
 
-**Pin the version.** An unpinned git URL makes Unity contact GitHub on
-every single build to check whether the branch moved, so a network hiccup
-aborts the build with `Project has invalid dependencies`. Add `#<tag>` in
-`Packages/manifest.json`:
+## Install
+
+Install with Unity Package Manager using **Add package from Git URL**:
+
+```text
+https://github.com/dat140196/pearz-ci.git#1.2.6
+```
+
+Pin the package version/tag in `Packages/manifest.json` so Unity does not have to follow a moving Git revision on every build:
 
 ```json
-"com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.7"
+{
+  "dependencies": {
+    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.2.6"
+  }
+}
 ```
 
-Unity then locks that revision in `packages-lock.json` and reuses its
-cache. Change the tag when you want the update.
+Unity stores the resolved revision in `Packages/packages-lock.json`. Update the tag when you intentionally upgrade UMP.
 
-The Jenkinsfile and the `Jenkins/` scripts are written into the project
-**automatically** when the package is installed or updated - nothing to click.
+## Generated Jenkins files
 
-To force a sync (e.g. after editing the generated files by hand):
+UMP templates are the source of truth. In a normal Unity Editor session, installing/updating the package or running the setup sync writes the generated build files into the game project.
 
-**Pearz > SetupJenkin** -> `Sync`
+To force a sync:
 
-No Unity path to fill in: the build machine resolves Unity itself
-(`Jenkins/find_unity.sh`) from `ProjectSettings/ProjectVersion.txt`,
-then from Unity Hub. Set `UNITY_PATH` in Jenkins only to override it.
-
-Branches:
-- release/android -> AAB
-- release/android-test -> APK
-- release/ios-test -> iOS Xcode project
-- release/ios -> Archive/Export/TestFlight
-
-Jenkins credentials (Secret text):
-- UMP_DRIVE_SERVICE_ACCOUNT_JSON (the service-account JSON itself)
-- UMP_DRIVE_FOLDER_ID
-- UMP_TELEGRAM_BOT_TOKEN
-- UMP_TELEGRAM_CHAT_ID
-
-## Telegram notifications
-
-Every build posts its result to a group, with the artifact attached when
-it is 50 MB or smaller:
-
-```
-✅ MeowPuzzle - SUCCESS
-Branch: release/android
-Build: #14
-Version: 1.0.0 (7)
-Artifact: MeowPuzzle-v1.0.0.aab
-Drive: https://drive.google.com/file/d/1sztK.../view
-Jenkins: http://.../job/MeowPuzzle/job/release%2Fandroid/14/
+```text
+Pearz > SetupJenkin > Sync
 ```
 
-`Version` is `bundleVersion (versionCode)` from Player Settings - the
-Android bundle version code, or the iOS build number on an iOS branch -
-read from `Builds/ump_build_info.txt` which Unity writes at the end of the
-build. The `Drive` line appears on the Android branches, from
-`Builds/ump_drive_url.txt` which the uploader writes; a link left by an
-earlier build is ignored unless it belongs to this build's artifact.
+Important: Jenkins runs Unity in `-batchmode`. UMP auto-sync is intentionally skipped in batch mode, so after updating the UMP package you must open/sync the project in Unity and commit the regenerated files to the game repository before Jenkins can use the new pipeline version.
 
-The name is the **productName** from Player Settings, so several games on
-one Jenkins are told apart at a glance. `UMP_GAME_NAME` overrides it.
+Typical generated files include:
 
-**1. Create the bot.** Chat with [@BotFather](https://t.me/BotFather),
-`/newbot`, answer the two questions, copy the token
-(`8123456789:AAH...`).
+```text
+Jenkinsfile
+Assets/Editor/JenkinsBuild.cs
+Jenkins/build_android.sh
+Jenkins/build_ios.sh
+Jenkins/find_unity.sh
+Jenkins/resolve_keystore.sh
+Jenkins/strip_ios_iap.sh
+Jenkins/install_ios_device.sh
+Jenkins/upload_drive.sh
+Jenkins/upload_drive_impl.py
+Jenkins/notify_telegram.sh
+```
 
-**2. Put the bot in the group.** Add it as a member. Then send any message
-in the group - a bot cannot see a group it has never received anything
-from.
+Every generated build script prints the UMP version in Jenkins logs. If the log shows an older UMP version than the package, sync again in Unity and commit the generated files.
 
-**3. Read the chat id:**
+## Branch rules
+
+| Branch | Build | Signing / upload behavior |
+|---|---|---|
+| `release/android` | Android `.aab` | Release keystore required, then Google Drive upload |
+| `release/android-test` | Android `.apk` | Custom/release keystore skipped, then Google Drive upload |
+| `release/ios-test` | Xcode project + direct device install | Append existing Xcode project, Personal Team/device signing, test-only IAP cleanup |
+| `release/ios` | Archive / Export / TestFlight | Production iOS flow; device-test IAP cleanup is not applied |
+
+Any other branch is rejected by the pipeline validation stage.
+
+## Jenkins credentials
+
+Create the following credentials only for the features you use.
+
+### Git / submodules
+
+```text
+ID: github-ssh
+Kind: SSH Username with private key
+```
+
+The SSH key must be able to clone every private Git submodule used by the Unity project.
+
+### Android release signing (`release/android` only)
+
+Optional Jenkins credentials:
+
+```text
+UMP_ANDROID_KEYSTORE           File
+UMP_ANDROID_KEYSTORE_PASS      Secret text
+UMP_ANDROID_KEY_ALIAS          Secret text
+UMP_ANDROID_KEY_ALIAS_PASS     Secret text
+```
+
+If `UMP_ANDROID_KEYSTORE` is not configured, the release branch falls back to the project/machine keystore resolver described below.
+
+`release/android-test` does not bind these credentials at all and explicitly disables Unity custom keystore signing.
+
+### Google Drive OAuth 2.0
+
+Create these four credentials as **Secret text**:
+
+```text
+UMP_DRIVE_OAUTH_CLIENT_ID
+UMP_DRIVE_OAUTH_CLIENT_SECRET
+UMP_DRIVE_OAUTH_REFRESH_TOKEN
+UMP_DRIVE_FOLDER_ID
+```
+
+`UMP_DRIVE_SERVICE_ACCOUNT_JSON` is no longer used.
+
+### Telegram
+
+Create these as **Secret text**:
+
+```text
+UMP_TELEGRAM_BOT_TOKEN
+UMP_TELEGRAM_CHAT_ID
+```
+
+### iOS keychain
+
+When required by the Jenkins Mac/Xcode setup:
+
+```text
+UMP_KEYCHAIN_PASSWORD
+```
+
+## SSH Git submodules
+
+Before Unity starts, Jenkins now initializes SSH submodules on every supported release branch. This is required for Unity local packages stored in submodules, for example:
+
+```text
+Packages/com.pearz.thirdparty
+```
+
+Example `.gitmodules`:
+
+```ini
+[submodule "Packages/com.pearz.thirdparty"]
+    path = Packages/com.pearz.thirdparty
+    url = git@github.com:PearzGame/pearz-thirdparty.git
+```
+
+The pipeline runs approximately:
 
 ```bash
-curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'
+git submodule sync --recursive
+git submodule foreach --recursive 'git reset --hard || true'
+git submodule foreach --recursive 'git clean -fd || true'
+git submodule update --init --recursive --force
+git submodule status --recursive
 ```
 
-A supergroup id looks like `-1001234567890` and the minus sign is part of
-it. If nothing comes back, promote the bot to admin (privacy mode hides
-normal messages from it) and post again.
+If `.gitmodules` does not exist, the stage is skipped cleanly.
 
-**4. Add the two credentials** in Jenkins (*Manage Jenkins > Credentials*),
-kind **Secret text**, ID exactly `UMP_TELEGRAM_BOT_TOKEN` and
-`UMP_TELEGRAM_CHAT_ID` - the Jenkinsfile looks them up by that ID.
+If `.gitmodules` declares `Packages/com.pearz.thirdparty`, Jenkins additionally verifies:
 
-**5. One topic per game.** Turn **Topics** on for the group
-(*Group Settings > Topics*) and give the bot the **Manage topics** right
-(*Group Settings > Administrators > the bot*). The first build of a game
-then creates a topic named after it, and every later build posts inside
-that topic.
-
-The Bot API cannot list the topics of a group, so the ids of the topics it
-created are remembered on the build machine, in
-`~/.pearz/telegram-topics`:
-
-```
--1001234567890	MeowPuzzle	2
--1001234567890	Sand Shooter	7
+```text
+Packages/com.pearz.thirdparty/package.json
 ```
 
-- Delete a line to have the topic created again (renaming a game does the
-  same by itself - the old topic is left alone and a new one appears).
-- A topic someone **closed** is reopened, a topic someone **deleted** is
-  recreated, both on the next build.
-- Whatever goes wrong - not a forum, missing rights, bad token - the
-  message still lands in the group unthreaded. Telegram never fails a
-  build; it only prints a line in the log.
-
-Overrides, as global environment variables in
-*Manage Jenkins > System > Global properties*:
-
-```
-UMP_TELEGRAM_AUTO_TOPIC = 0                        # never create topics
-UMP_TELEGRAM_TOPIC_ID   = 2                        # everything in one topic
-UMP_TELEGRAM_TOPICS     = MeowPuzzle=2;Sand Shooter=7   # topics made by hand
-```
-
-`UMP_TELEGRAM_TOPICS` wins over what the bot created, which is how an
-existing topic is adopted: read its id from the Telegram Web URL
-(`t.me/c/<group>/<topic id>/<message id>` - the middle number).
-
-## Build workspace
-
-The job does **not** build in the hidden Jenkins workspace. It checks the
-project out on the **Desktop of the build machine**, so the exact tree
-Jenkins built can be opened in Finder, Unity or Xcode while a failure is
-being looked at:
-
-```
-~/Desktop/PearzBuilds/MeowPuzzle/release_android
-```
-
-`Builds/` and the generated Xcode project are inside that folder as usual.
-
-The folder is the job name with every unsafe character replaced. The `%2F`
-Jenkins puts in `JOB_NAME` for a branch **must** go: Unity 6 dies halfway
-through an Android build on a path containing `%`, with
-`llvm-objcopy: error: '<path>': No such file or directory` for a file whose
-folder is right there.
-
-`~` is the home of the **user Jenkins runs as**, guessed from the parent of
-`JENKINS_HOME` because the real `$HOME` is not readable at the point
-Jenkins picks the workspace. With the usual `~/.jenkins` that is correct.
-When it is not - Jenkins installed as the system service, a `JENKINS_HOME`
-somewhere else, a remote agent - set a global environment variable
-(**Manage Jenkins > System > Global properties > Environment variables**):
-
-```
-UMP_WORKSPACE_ROOT = /Users/<you>/Desktop/PearzBuilds
-```
-
-That user then needs write access to the folder. The first build after
-this change re-clones the project into the new location; the old workspace
-under `~/.jenkins/workspace` can be deleted by hand.
-
-## iOS test install (release/ios-test)
-
-`Jenkins/install_ios_device.sh` compiles the Xcode project Unity exported
-and installs it on the device attached to the Jenkins Mac.
-
-A **free Apple ID gives a Personal Team**, and Apple refuses to issue a
-development profile with In-App Purchase for one:
-
-```
-Cannot create a iOS App Development provisioning profile for "com.x.y".
-Personal development teams, including "...", do not support the
-In-App Purchase capability.
-```
-
-The script therefore strips `com.apple.InAppPurchase` from the **exported**
-project (`Builds/`, never the repo or the game code), removes the IAP and
-push keys from any `.entitlements` it finds, and - if Xcode still asks for
-a capability the team cannot sign - retries once with no entitlements at
-all. The test build then has no IAP, no push and no keychain sharing;
-`release/ios` (Archive/TestFlight) never goes through this script, so what
-ships is untouched.
-
-- `UMP_IOS_STRIP_CAPABILITIES=""` turns all of it off (paid team).
-- `UMP_IOS_STRIP_CAPABILITIES="com.apple.InAppPurchase com.apple.Push"`
-  strips more when the log names another capability.
-- `UMP_IOS_TEAM_ID` picks the team; otherwise Player Settings, then the
-  Apple ID signed in to Xcode, then a certificate on the Mac.
-
-Every generated script prints `UMP <version>` at the top. If that version
-is older than the package, the branch is running scripts from an earlier
-sync - re-sync in Unity and push the `Jenkins/` folder to **that branch**.
+This prevents Unity Package Manager from failing later with a misleading local-package dependency error.
 
 ## Android signing
 
-No Jenkins credential: the key is committed with the game and looked up by
-**package name** (`applicationIdentifier` in Player Settings), in
-`Keystores/` next to `Assets/`:
+### `release/android`
 
-```
+This branch builds the Google Play `.aab` and **must use the release key**.
+
+Keystore lookup order is:
+
+1. Jenkins `UMP_ANDROID_*` credentials when configured.
+2. `Keystores/` inside the game repository.
+3. `~/.pearz/keystores` on the build machine, or `UMP_KEYSTORE_HOME` when overridden.
+
+A project keystore layout can look like:
+
+```text
 Keystores/
   com.pearz.meowpuzzle.keystore
   com.pearz.meowpuzzle.properties
 ```
 
-Create the key once, then back it up - losing it means the app can never be
-updated on Google Play again:
+Example properties:
 
+```properties
+storePass=your-store-password
+alias=pearz
+aliasPass=your-alias-password
 ```
-keytool -genkeypair -v -keystore Keystores/com.pearz.meowpuzzle.keystore \
-  -alias pearz -keyalg RSA -keysize 2048 -validity 10000
+
+Create a key once and back it up safely:
+
+```bash
+keytool -genkeypair -v \
+  -keystore Keystores/com.pearz.meowpuzzle.keystore \
+  -alias pearz \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
 ```
 
-The `.properties` file is written by **Pearz > SetupJenkin**: fill in
-`storePass`, `alias`, `aliasPass` and press `Sync`. The file is named after
-the package name and overwritten on every sync; leaving all three fields
-empty writes nothing. `aliasPass` may stay empty when the alias uses the
-store password, and `alias` must match what is really inside the key file
-(`keytool -list -v -keystore Keystores/<package>.keystore`) - a wrong value
-fails the build with `No key with alias 'x' found in keystore`.
+Verify the real alias when debugging signing errors:
 
-Lookup order is `<applicationIdentifier>`, the product name without spaces,
-then `default`; `Keystores/` in the repo first, then
-`~/.pearz/keystores` on the build machine
-(`UMP_KEYSTORE_HOME`), then job credentials
-(`UMP_ANDROID_KEYSTORE_PASS` / `UMP_ANDROID_KEY_ALIAS` /
-`UMP_ANDROID_KEY_ALIAS_PASS`), which win over both.
+```bash
+keytool -list -v -keystore Keystores/com.pearz.meowpuzzle.keystore
+```
 
-The passwords are plain text, so the game repository must be **private**.
-If the key may not live in git, skip the `.properties` file and use the
-Jenkins credentials or the machine store instead.
+### `release/android-test`
+
+This branch builds an APK with Android debug/default signing.
+
+The pipeline intentionally:
+
+```text
+- does not request Jenkins release-keystore credentials
+- does not run the release keystore resolver
+- clears stale UMP_ANDROID_* environment variables
+- sets PlayerSettings.Android.useCustomKeystore = false
+```
+
+This prevents a test APK from being accidentally signed with the production key.
+
+## Google Drive OAuth 2.0
+
+Android artifacts are uploaded after a successful Android build.
+
+Default Drive path:
+
+```text
+<UMP_DRIVE_FOLDER_ID>/<Game name>/<AAB|APK>/<artifact>
+```
+
+The uploader preserves the existing behavior:
+
+- Missing game/artifact folders are created automatically.
+- If a file with the same name already exists in the destination folder, the uploader updates that file instead of creating another file. The Drive file ID/share link is retained.
+- Older duplicate files with the same name are moved to Trash by default.
+- Set `UMP_DRIVE_KEEP_DUPLICATES=1` to keep old duplicates.
+- Set `UMP_DRIVE_SUBPATH` to override the generated subpath.
+- Set `UMP_DRIVE_SUBPATH` to an explicitly empty value to upload directly into the configured root folder.
+
+Drive upload failure is logged but does not fail an otherwise successful game build.
+
+### Create the OAuth client
+
+In Google Cloud:
+
+1. Enable **Google Drive API**.
+2. Configure the OAuth consent screen.
+3. Create an **OAuth 2.0 Client ID** with application type **Web application**.
+4. Add this exact Authorized redirect URI:
+
+```text
+https://developers.google.com/oauthplayground
+```
+
+### Obtain `UMP_DRIVE_OAUTH_REFRESH_TOKEN`
+
+Open Google OAuth 2.0 Playground and configure:
+
+```text
+Use your own OAuth credentials: ON
+OAuth flow: Server-side
+Access type: Offline
+```
+
+Enter the Client ID and Client Secret created above.
+
+Authorize this scope:
+
+```text
+https://www.googleapis.com/auth/drive
+```
+
+Then choose **Exchange authorization code for tokens** and copy the returned `refresh_token` into the Jenkins Secret Text credential:
+
+```text
+UMP_DRIVE_OAUTH_REFRESH_TOKEN
+```
+
+The Jenkins uploader exchanges this long-lived refresh token for a short-lived access token on each upload, so no interactive Google login is required during builds.
+
+If Google reports:
+
+```text
+Error 400: redirect_uri_mismatch
+```
+
+verify that the OAuth client is a **Web application** and its Authorized redirect URI is exactly:
+
+```text
+https://developers.google.com/oauthplayground
+```
+
+For a long-running Jenkins setup, avoid leaving an External OAuth consent configuration in Testing mode when its refresh-token lifetime is unsuitable for your workflow.
+
+## Build workspace
+
+The pipeline builds outside the hidden Jenkins workspace so the exact project tree can be opened directly in Finder, Unity, or Xcode while debugging.
+
+Typical path:
+
+```text
+~/Desktop/PearzBuilds/MeowPuzzle/release_android
+```
+
+`Builds/` and generated Xcode projects stay inside that workspace.
+
+The branch/job name is sanitized because Unity 6 can fail on build paths containing Jenkins `%2F` branch encoding.
+
+Override the workspace root with a Jenkins global environment variable:
+
+```text
+UMP_WORKSPACE_ROOT=/Users/<you>/Desktop/PearzBuilds
+```
+
+## Unity path resolution
+
+No Unity executable path is required in the project.
+
+`Jenkins/find_unity.sh` resolves the Unity version from:
+
+```text
+ProjectSettings/ProjectVersion.txt
+```
+
+and then locates that editor in Unity Hub installations.
+
+Use the Jenkins environment variable `UNITY_PATH` only when you need an explicit override.
+
+## iOS device build (`release/ios-test`)
+
+The device branch exports into:
+
+```text
+Builds/iOS/<sanitized product name>
+```
+
+When an existing compatible Xcode project is present, Unity uses:
+
+```text
+BuildOptions.AcceptExternalModificationsToPlayer
+```
+
+so the export is appended instead of replacing the Xcode project. This preserves Xcode signing/team setup between builds.
+
+Set:
+
+```text
+UMP_IOS_CLEAN=1
+```
+
+to force a clean Xcode export.
+
+### Personal Team / In-App Purchase cleanup
+
+For `release/ios-test`, UMP performs device-test-only cleanup after Unity export:
+
+1. `JenkinsBuild.cs` removes `StoreKit.framework` from the `Unity-iPhone` app target.
+2. `StoreKit.framework` remains on `UnityFramework`, where Unity IAP/plugin code can still live.
+3. `Jenkins/strip_ios_iap.sh` removes a remaining literal `com.apple.InAppPurchase` Xcode capability marker if present.
+4. The script verifies that the bundle identifier and signing settings were not changed by the cleanup.
+5. The script verifies that StoreKit is no longer linked by more than one target.
+
+The normal `release/ios` Archive/TestFlight flow does not use this device-test cleanup.
+
+Useful overrides:
+
+```text
+UMP_IOS_STRIP_IAP=0      # disable Unity-side StoreKit app-target cleanup
+UMP_IOS_STRIP_IAP=1      # force it on
+UMP_IOS_CLEAN=1          # force clean Unity Xcode export
+UMP_IOS_TEAM_ID=<TEAM>   # explicit development team when needed
+```
+
+## iOS production (`release/ios`)
+
+The production iOS branch performs the normal archive/export/TestFlight flow. Test-device IAP stripping is intentionally restricted to `release/ios-test` so production capabilities are not modified by that workaround.
+
+## Telegram notifications
+
+Every build posts its result to Telegram. When an artifact is small enough for Telegram upload, it can also be attached; Android notifications include the Drive URL written by the Drive uploader.
+
+Typical message:
+
+```text
+✅ MeowPuzzle - SUCCESS
+Branch: release/android
+Build: #14
+Version: 1.0.0 (7)
+Artifact: MeowPuzzle-v1.0.0.aab
+Drive: https://drive.google.com/file/d/.../view
+Jenkins: http://.../job/MeowPuzzle/job/release%2Fandroid/14/
+```
+
+`Version` is generated from Unity Player Settings and written to `Builds/ump_build_info.txt`.
+
+The game name normally comes from `PlayerSettings.productName`. Override it with:
+
+```text
+UMP_GAME_NAME
+```
+
+To use Telegram forum topics, give the bot permission to manage topics. UMP stores automatically-created topic IDs on the Jenkins machine under:
+
+```text
+~/.pearz/telegram-topics
+```
+
+Optional Jenkins global environment overrides:
+
+```text
+UMP_TELEGRAM_AUTO_TOPIC=0
+UMP_TELEGRAM_TOPIC_ID=2
+UMP_TELEGRAM_TOPICS=MeowPuzzle=2;Sand Shooter=7
+```
+
+Telegram notification errors are reported in the log but do not fail the game build.
+
+## Upgrade checklist
+
+When upgrading UMP:
+
+```text
+1. Update the Git package tag/revision in Packages/manifest.json.
+2. Let Unity resolve the package.
+3. Run Pearz > SetupJenkin > Sync if needed.
+4. Confirm generated files print the new UMP version.
+5. Commit Packages/manifest.json and Packages/packages-lock.json.
+6. Commit Jenkinsfile, Assets/Editor/JenkinsBuild.cs and changed Jenkins/* generated files.
+7. Push the target release branch.
+8. Run Jenkins and verify the expected branch-specific stages in the log.
+```
+
+## Current version
+
+```text
+UMP 1.2.6
+```
+
+Key changes through 1.2.6:
+
+```text
+1.2.3  iOS device build: remove StoreKit.framework from Unity-iPhone only.
+1.2.4  Android signing: release keystore only on release/android AAB.
+1.2.5  Google Drive: OAuth 2.0 Client ID + refresh token, preserve overwrite/folder logic.
+1.2.6  Jenkins: initialize/update SSH Git submodules before Unity Package Manager runs.
+```
