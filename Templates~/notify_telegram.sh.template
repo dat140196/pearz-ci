@@ -53,6 +53,19 @@ if [ -z "$GAME" ]; then
 fi
 [ -n "$GAME" ] || GAME="Game"
 
+# Build platform is derived from the release branch.
+# Android: release/android, release/android-test
+# iOS:     release/ios, release/ios-test
+PLATFORM_LABEL=""
+case "$BRANCH" in
+    release/android|release/android-test)
+        PLATFORM_LABEL="Android"
+        ;;
+    release/ios|release/ios-test)
+        PLATFORM_LABEL="IOS"
+        ;;
+esac
+
 case "$STATUS" in
     SUCCESS) ICON="✅" ;;
     UNSTABLE) ICON="⚠️" ;;
@@ -61,7 +74,11 @@ case "$STATUS" in
     *) ICON="❌" ;;
 esac
 
-MESSAGE="$ICON $GAME - $STATUS"
+if [ -n "$PLATFORM_LABEL" ]; then
+    MESSAGE="$ICON [$PLATFORM_LABEL Build] $GAME - $STATUS"
+else
+    MESSAGE="$ICON $GAME - $STATUS"
+fi
 append_line() {
     MESSAGE="${MESSAGE}"$'\n'"$1"
 }
