@@ -16,10 +16,15 @@ Destination behavior is intentionally the same as the previous uploader:
 - Older same-name duplicates are trashed unless UMP_DRIVE_KEEP_DUPLICATES=1.
 - UMP_DRIVE_SUBPATH overrides the generated subpath; an explicitly empty
   value uploads directly into UMP_DRIVE_FOLDER_ID.
+- If <GameName>_BUILD_INFO.txt exists beside the artifact (or directly under
+  Builds/), it is uploaded into the SAME Drive folder as the artifact. Its
+  Drive name gets a version suffix, e.g. MeowTrail_BUILD_INFO_v1.2.3.txt.
+  Rebuilding the same version updates that same Drive file/revision.
 """
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -364,7 +369,7 @@ def send_chunks(session_uri, access_token, file_path, file_size):
     return result
 
 
-def write_drive_url(result, file_path):
+def report_upload(result, file_path, write_url_file):
     file_id = result.get("id", "")
     file_name = result.get("name", os.path.basename(file_path))
     url = result.get("webViewLink") or (
@@ -375,6 +380,12 @@ def write_drive_url(result, file_path):
     log("File ID: " + (file_id or "unknown"))
     log("File name: " + file_name)
     log("Drive URL: " + (url or "unknown"))
+
+    # Keep Builds/ump_drive_url.txt pointing at the actual APK/AAB/IPA.
+    # Telegram and post-build messages consume that file, so the optional
+    # BUILD_INFO upload must never replace it with a text-file URL.
+    if not write_url_file:
+        return
 
     url_path = os.environ.get("UMP_DRIVE_URL_FILE", "Builds/ump_drive_url.txt")
     try:
@@ -388,20 +399,28 @@ def write_drive_url(result, file_path):
         log("WARNING: could not write %s: %s" % (url_path, error))
 
 
-def build_info():
-    path = os.environ.get("UMP_BUILD_INFO", "Builds/ump_build_info.txt")
+def read_key_value_file(path):
     values = {}
-    if not os.path.isfile(path):
+    if not path or not os.path.isfile(path):
         return values
 
-    with open(path, "r", encoding="utf-8") as stream:
-        for raw in stream:
-            line = raw.strip()
-            if not line or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip()
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            for raw in stream:
+                line = raw.strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+    except (OSError, UnicodeError) as error:
+        log("WARNING: cannot read build info %s: %s" % (path, error))
+
     return values
+
+
+def build_info():
+    path = os.environ.get("UMP_BUILD_INFO", "Builds/ump_build_info.txt")
+    return read_key_value_file(path)
 
 
 def game_name(info):
@@ -417,23 +436,98 @@ def game_name(info):
     return job.split("/")[0] if job else ""
 
 
-def sub_path(file_path):
+def sub_path(file_path, info):
     if "UMP_DRIVE_SUBPATH" in os.environ:
         return os.environ["UMP_DRIVE_SUBPATH"].strip()
 
     kinds = {".apk": "APK", ".aab": "AAB", ".ipa": "IPA"}
     kind = kinds.get(os.path.splitext(file_path)[1].lower(), "")
-    parts = [part for part in (game_name(build_info()), kind) if part]
+    parts = [part for part in (game_name(info), kind) if part]
     return "/".join(parts)
 
 
-def upload(access_token, folder_id, file_path):
-    file_name = os.path.basename(file_path)
+def safe_file_part(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+    return value.strip("._-")
+
+
+def find_companion_build_info(artifact, info):
+    artifact_dir = os.path.abspath(os.path.dirname(artifact) or ".")
+    search_dirs = [artifact_dir]
+
+    builds_root = os.path.abspath("Builds")
+    if builds_root not in search_dirs:
+        search_dirs.append(builds_root)
+
+    preferred = []
+    for name in (info.get("PRODUCT_NAME_SAFE", ""), info.get("PRODUCT_NAME", ""), game_name(info)):
+        name = (name or "").strip()
+        if name:
+            preferred.append(name + "_BUILD_INFO.txt")
+            safe = safe_file_part(name)
+            if safe:
+                preferred.append(safe + "_BUILD_INFO.txt")
+
+    # Preserve order while removing duplicates.
+    seen = set()
+    preferred = [x for x in preferred if not (x in seen or seen.add(x))]
+
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        for file_name in preferred:
+            candidate = os.path.join(directory, file_name)
+            if os.path.isfile(candidate):
+                return candidate
+
+    # Fallback for projects that generate the conventional *_BUILD_INFO.txt
+    # but sanitize the game name differently from UMP. Only auto-pick it when
+    # the directory contains exactly one such file, so stale files cannot be
+    # selected ambiguously.
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        matches = sorted(
+            os.path.join(directory, entry)
+            for entry in os.listdir(directory)
+            if entry.endswith("_BUILD_INFO.txt")
+            and os.path.isfile(os.path.join(directory, entry))
+        )
+        if len(matches) == 1:
+            return matches[0]
+
+    return ""
+
+
+def build_info_drive_name(local_path, info):
+    companion = read_key_value_file(local_path)
+    version = info.get("VERSION", "").strip() or companion.get("VERSION", "").strip()
+    version = safe_file_part(version)
+
+    base, ext = os.path.splitext(os.path.basename(local_path))
+    ext = ext or ".txt"
+
+    if not version:
+        raise RuntimeError(
+            "BUILD_INFO file found but VERSION is unavailable: " + local_path
+        )
+
+    version_label = version if version.lower().startswith("v") else "v" + version
+    return "%s_%s%s" % (base, version_label, ext)
+
+
+def upload(access_token, folder_id, file_path, remote_name=None, write_url_file=True):
+    file_name = remote_name or os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
     if file_size <= 0:
         raise RuntimeError("Artifact is empty: " + file_path)
 
     log("Uploading to Google Drive: " + file_name)
+    if remote_name and remote_name != os.path.basename(file_path):
+        log("Local file: " + file_path)
     log("File size: %d bytes" % file_size)
 
     target_id = replacement_target(access_token, folder_id, file_name)
@@ -441,7 +535,7 @@ def upload(access_token, folder_id, file_path):
         access_token, folder_id, file_name, file_size, target_id
     )
     result = send_chunks(session_uri, access_token, file_path, file_size)
-    write_drive_url(result, file_path)
+    report_upload(result, file_path, write_url_file)
 
 
 def main():
@@ -469,8 +563,10 @@ def main():
         )
     )
 
+    info_values = build_info()
+
     target_folder = root_id
-    path = sub_path(artifact)
+    path = sub_path(artifact, info_values)
     if path:
         log("Drive path: " + path)
         try:
@@ -484,7 +580,25 @@ def main():
             )
             target_folder = root_id
 
+    # Upload the game artifact first. This is still the canonical URL written
+    # to Builds/ump_drive_url.txt and used by Telegram notifications.
     upload(access_token, target_folder, artifact)
+
+    companion = find_companion_build_info(artifact, info_values)
+    if companion:
+        drive_name = build_info_drive_name(companion, info_values)
+        log("Companion BUILD_INFO found: " + companion)
+        log("Companion Drive name: " + drive_name)
+        log("Companion destination: same Drive folder as artifact")
+        upload(
+            access_token,
+            target_folder,
+            companion,
+            remote_name=drive_name,
+            write_url_file=False,
+        )
+    else:
+        log("Companion BUILD_INFO: not found - skipped (optional).")
 
 
 if __name__ == "__main__":

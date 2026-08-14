@@ -149,6 +149,21 @@ pipeline {
         }
     }
 
+    parameters {
+
+        // release/ios-test only. OFF is the safe default for
+        // Personal Team device builds: Push Notifications/APNs
+        // signing requirements are removed from the exported Xcode
+        // project after Unity finishes. Turn ON only when this build
+        // is specifically testing Firebase Cloud Messaging / APNs
+        // with an Apple Developer team that supports Push.
+        booleanParam(
+            name: 'IOS_TEST_ENABLE_FIREBASE_PUSH',
+            defaultValue: false,
+            description: 'release/ios-test: keep Firebase/APNs Push Notifications. OFF strips Push signing requirements for Personal Team.'
+        )
+    }
+
     options {
 
         // A push while a build is running must queue, never start a
@@ -402,24 +417,43 @@ pipeline {
                              'add one if xcodebuild reports "No Accounts".'
                     }
 
+                    def firebasePushEnabled =
+                        params.IOS_TEST_ENABLE_FIREBASE_PUSH == true
+
+                    def stripFirebasePush =
+                        firebasePushEnabled ? '0' : '1'
+
+                    echo '========================================'
+                    echo '[PEARZ] iOS test Firebase Push: ' +
+                         (firebasePushEnabled ?
+                            'ENABLED - keep APNs capability' :
+                            'DISABLED - strip APNs signing requirements')
+                    echo '========================================'
+
                     def run = {
 
                         // The strip runs between the two on purpose:
-                        // Unity packages add capabilities from post-
-                        // process callbacks, and only once the editor
-                        // has exited is the project final.
-                        sh '''
-                            chmod +x Jenkins/find_unity.sh
-                            chmod +x Jenkins/build_ios.sh
-                            chmod +x Jenkins/strip_ios_iap.sh
-                            chmod +x Jenkins/install_ios_device.sh
+                        // Unity/Firebase packages add capabilities from
+                        // post-process callbacks. Only after Unity exits
+                        // is the exported Xcode project final. The strip
+                        // changes only that generated Xcode project; it
+                        // never edits the Unity project or Firebase code.
+                        withEnv([
+                            "UMP_IOS_STRIP_FIREBASE_PUSH=${stripFirebasePush}"
+                        ]) {
+                            sh '''
+                                chmod +x Jenkins/find_unity.sh
+                                chmod +x Jenkins/build_ios.sh
+                                chmod +x Jenkins/strip_ios_iap.sh
+                                chmod +x Jenkins/install_ios_device.sh
 
-                            ./Jenkins/build_ios.sh
+                                ./Jenkins/build_ios.sh
 
-                            ./Jenkins/strip_ios_iap.sh
+                                ./Jenkins/strip_ios_iap.sh
 
-                            ./Jenkins/install_ios_device.sh
-                        '''
+                                ./Jenkins/install_ios_device.sh
+                            '''
+                        }
                     }
 
                     if (hasKeychain) {

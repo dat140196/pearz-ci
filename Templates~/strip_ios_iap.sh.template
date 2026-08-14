@@ -2,25 +2,32 @@
 set -euo pipefail
 
 # ============================================================
-# PEARZ iOS device build - final IAP cleanup/verification.
+# PEARZ iOS device build - final capability cleanup/verification.
 #
 # Runs AFTER Unity export and BEFORE xcodebuild.
 #
-# Unity's JenkinsBuild.cs removes StoreKit.framework from the
-# Unity-iPhone app target while intentionally keeping StoreKit on
-# UnityFramework. This script then removes any remaining literal
-# In-App Purchase capability marker from project.pbxproj and verifies
-# that signing/bundle-id settings were not changed.
+# Always for release/ios-test:
+#   - finish the Personal Team IAP cleanup.
+#
+# Optional for release/ios-test:
+#   - strip Firebase/APNs Push Notifications signing requirements
+#     from the generated Xcode project only. This does NOT edit the
+#     Unity project, Firebase packages, or game source code.
+#
+# Jenkins checkbox IOS_TEST_ENABLE_FIREBASE_PUSH maps to:
+#   UMP_IOS_STRIP_FIREBASE_PUSH=1  -> strip Push/APNs (default)
+#   UMP_IOS_STRIP_FIREBASE_PUSH=0  -> keep Push/APNs for FCM testing
 #
 # Optional env vars:
 #   UMP_IOS_PROJECT=/path/to/Unity-iPhone.xcodeproj
 #   IOS_SCHEME=Unity-iPhone
 #   UMP_IOS_CONFIGURATION=Release
 #   UMP_IOS_STRIP_BRANCH=""       # allow any branch
+#   UMP_IOS_STRIP_FIREBASE_PUSH=1 # default: strip Push/APNs
 # ============================================================
 
 echo "========================================"
-echo "[PEARZ] iOS IAP final cleanup"
+echo "[PEARZ] iOS device capability cleanup"
 echo "[PEARZ] UMP @UMP_VERSION@"
 echo "========================================"
 
@@ -128,6 +135,106 @@ fi
 
 echo "[PEARZ] Local IAP capability marker: absent."
 
+# ------------------------------------------------------------
+# Optional Firebase / APNs Push cleanup for Personal Team builds.
+#
+# FCM on iOS is delivered through APNs. The signing-sensitive part
+# is the Push Notifications capability / aps-environment entitlement.
+# Remove those only from the generated Xcode project. Keep all
+# Firebase assemblies, Unity code, GoogleService-Info.plist, and
+# production release/ios behavior untouched.
+# ------------------------------------------------------------
+STRIP_FIREBASE_PUSH="${UMP_IOS_STRIP_FIREBASE_PUSH:-1}"
+
+case "$STRIP_FIREBASE_PUSH" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+        STRIP_FIREBASE_PUSH=0
+        ;;
+    *)
+        STRIP_FIREBASE_PUSH=1
+        ;;
+esac
+
+if [ "$STRIP_FIREBASE_PUSH" = "1" ]; then
+    echo "========================================"
+    echo "[PEARZ] Firebase Push/APNs : STRIP for test signing"
+    echo "========================================"
+
+    PUSH_BEFORE="$(grep -nE 'com\.apple\.Push|Push Notifications' \
+        "$PBXPROJ" 2>/dev/null || true)"
+
+    if [ -n "$PUSH_BEFORE" ]; then
+        echo "[PEARZ] Push capability metadata before:"
+        echo "$PUSH_BEFORE" | head -n 30 | sed 's/^/[PEARZ]   /'
+    fi
+
+    # ProjectCapabilityManager writes the Push Notifications switch
+    # under TargetAttributes/SystemCapabilities as com.apple.Push.
+    perl -0pi -e '
+        s/^[ \t]*"?com\.apple\.Push"?[ \t]*=[ \t]*\{[^{}]*\};[ \t]*\r?\n//mg;
+        s/^[ \t]*SystemCapabilities[ \t]*=[ \t]*\{[ \t\r\n]*\};[ \t]*\r?\n//mg;
+    ' "$PBXPROJ"
+
+    PUSH_AFTER="$(grep -nE 'com\.apple\.Push' "$PBXPROJ" 2>/dev/null || true)"
+    if [ -n "$PUSH_AFTER" ]; then
+        echo "[PEARZ] ERROR: com.apple.Push is still present:"
+        echo "$PUSH_AFTER" | sed 's/^/[PEARZ]   /'
+        exit 1
+    fi
+
+    echo "[PEARZ] Push Notifications capability marker: absent."
+
+    ENTITLEMENTS_FOUND=0
+    APS_REMOVED=0
+
+    while IFS= read -r ENTITLEMENTS; do
+        [ -n "$ENTITLEMENTS" ] || continue
+        ENTITLEMENTS_FOUND=$((ENTITLEMENTS_FOUND + 1))
+
+        if /usr/libexec/PlistBuddy \
+            -c 'Print :aps-environment' \
+            "$ENTITLEMENTS" >/dev/null 2>&1; then
+
+            /usr/libexec/PlistBuddy \
+                -c 'Delete :aps-environment' \
+                "$ENTITLEMENTS"
+
+            APS_REMOVED=$((APS_REMOVED + 1))
+            echo "[PEARZ] Removed aps-environment: $ENTITLEMENTS"
+        fi
+    done < <(find "$WORKSPACE/Builds/iOS" \
+        -type f \
+        -name '*.entitlements' \
+        -print 2>/dev/null | sort)
+
+    APS_LEFT=0
+    while IFS= read -r ENTITLEMENTS; do
+        [ -n "$ENTITLEMENTS" ] || continue
+        if /usr/libexec/PlistBuddy \
+            -c 'Print :aps-environment' \
+            "$ENTITLEMENTS" >/dev/null 2>&1; then
+            echo "[PEARZ] ERROR: aps-environment still present: $ENTITLEMENTS"
+            APS_LEFT=1
+        fi
+    done < <(find "$WORKSPACE/Builds/iOS" \
+        -type f \
+        -name '*.entitlements' \
+        -print 2>/dev/null | sort)
+
+    if [ "$APS_LEFT" -ne 0 ]; then
+        exit 1
+    fi
+
+    echo "[PEARZ] Entitlements files found : $ENTITLEMENTS_FOUND"
+    echo "[PEARZ] aps-environment removed : $APS_REMOVED"
+    echo "[PEARZ] Firebase SDK/code       : untouched"
+else
+    echo "========================================"
+    echo "[PEARZ] Firebase Push/APNs : KEEP for FCM test"
+    echo "[PEARZ] Apple Developer Push capability/profile is required."
+    echo "========================================"
+fi
+
 # Xcode must still be able to parse the edited project.
 if ! xcodebuild -list -project "$PROJECT" >/dev/null 2>&1; then
     echo "[PEARZ] ERROR: Xcode cannot parse the edited project."
@@ -186,7 +293,7 @@ grep -nEi 'StoreKit|InAppPurchase|In-App Purchase' "$PBXPROJ" \
 echo "[PEARZ] Verified bundle id : ${BUNDLE_AFTER:-<unknown>}"
 echo "[PEARZ] Verified signing   : unchanged"
 echo "========================================"
-echo "[PEARZ] iOS IAP final cleanup finished"
+echo "[PEARZ] iOS device capability cleanup finished"
 echo "========================================"
 
 trap - EXIT

@@ -259,6 +259,14 @@ if ! xcodebuild "${BUILD_ARGS[@]}" build 2>&1 | tee "$BUILD_LOG"; then
         echo "[PEARZ] Then check Jenkins/strip_ios_iap.sh diagnostics immediately above."
     fi
 
+    if grep -qE 'Push Notifications capability|aps-environment|doesn.t support the Push Notifications capability' "$BUILD_LOG"; then
+        echo "[PEARZ] Push/APNs signing requirement detected."
+        echo "[PEARZ] For a Personal Team test build, leave Jenkins parameter"
+        echo "[PEARZ] IOS_TEST_ENABLE_FIREBASE_PUSH unchecked."
+        echo "[PEARZ] Enable it only when testing Firebase Push with a team/profile"
+        echo "[PEARZ] that supports the Push Notifications capability."
+    fi
+
     if grep -qE 'No Accounts|No profiles for|requires a development team' "$BUILD_LOG"; then
         echo "[PEARZ] Signing account/profile problem detected."
         echo "[PEARZ] Ensure Xcode is signed in for team $TEAM and the Jenkins"
