@@ -15,7 +15,18 @@ set -euo pipefail
 #   UMP_TELEGRAM_TOPIC_ID
 #   UMP_TELEGRAM_TOPICS="Game A=123;Game B=456"
 #   UMP_TELEGRAM_AUTO_TOPIC=0
+#   UMP_TELEGRAM_TOPIC_CACHE=/path/to/topic-state
+#   UMP_TELEGRAM_TOPIC_STATE=/path/to/topic-state  (legacy alias)
 #   UMP_TELEGRAM_DRY_RUN=1
+#
+# Topic state notes:
+# - The default state is $HOME/.pearz/telegram-topics.
+# - Old single-file TSV state and the temporary *.d directory layout
+#   are both read for backward compatibility.
+# - Game aliases are matched canonically, so "MeowTrail" and
+#   "Meow Trail" resolve to the same remembered topic.
+# - Topic creation is protected by a cross-branch mkdir lock so two
+#   multibranch builds cannot create duplicate topics concurrently.
 #
 # Build metadata:
 #   Builds/ump_build_info.txt
@@ -46,10 +57,11 @@ BUILD_VERSION="$(read_kv "$INFO_FILE" BUILD_NUMBER)"
 PACKAGE_NAME="$(read_kv "$INFO_FILE" PACKAGE_NAME)"
 DRIVE_URL="$(read_kv "$DRIVE_URL_FILE" url)"
 BUILD_INFO_URL="$(read_kv "$BUILD_INFO_URL_FILE" url)"
+JOB_GAME="${JOB_NAME%%/*}"
 
 GAME="${UMP_GAME_NAME:-$PRODUCT_NAME}"
 if [ -z "$GAME" ]; then
-    GAME="${JOB_NAME%%/*}"
+    GAME="$JOB_GAME"
 fi
 [ -n "$GAME" ] || GAME="Game"
 
@@ -118,6 +130,10 @@ if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
     exit 1
 fi
 
+# Strip accidental whitespace/quotes from Jenkins secret text values.
+TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]$//")"
+CHAT_ID="$(printf '%s' "$CHAT_ID" | tr -d '[:space:]' | sed "s/^['\"]//; s/['\"]$//")"
+
 API="https://api.telegram.org/bot${TOKEN}"
 
 json_result_field() {
@@ -141,6 +157,7 @@ CHAT_JSON="$(curl -fsS --max-time 20 \
     --get --data-urlencode "chat_id=$CHAT_ID" \
     "$API/getChat" 2>/dev/null || true)"
 CHAT_TITLE="$(printf '%s' "$CHAT_JSON" | json_result_field title)"
+IS_FORUM="$(printf '%s' "$CHAT_JSON" | json_result_field is_forum)"
 if [ -n "$CHAT_TITLE" ]; then
     echo "[PEARZ] Telegram chat: $CHAT_TITLE"
 else
@@ -160,6 +177,34 @@ safe_name() {
         | tr -cd '[:alnum:]_.-'
 }
 
+canonical_name() {
+    printf '%s' "$1" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -cd '[:alnum:]'
+}
+
+game_alias_matches() {
+    local candidate="$1"
+    local wanted
+    local alias
+
+    wanted="$(canonical_name "$candidate")"
+    [ -n "$wanted" ] || return 1
+
+    for alias in "$GAME" "$PRODUCT_NAME" "$JOB_GAME" "${UMP_GAME_NAME:-}"; do
+        [ -n "$alias" ] || continue
+        if [ "$(canonical_name "$alias")" = "$wanted" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+topic_root() {
+    printf '%s' "${UMP_TELEGRAM_TOPIC_CACHE:-${UMP_TELEGRAM_TOPIC_STATE:-$HOME/.pearz/telegram-topics}}"
+}
+
 mapped_topic() {
     local mappings="${UMP_TELEGRAM_TOPICS:-}"
     local pair
@@ -171,87 +216,185 @@ mapped_topic() {
         [ -n "$pair" ] || continue
         name="${pair%%=*}"
         id="${pair#*=}"
-        if [ "$name" = "$GAME" ] && printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+        id="$(printf '%s' "$id" | tr -d '[:space:]')"
+        if game_alias_matches "$name" && printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
             printf '%s' "$id"
             return 0
         fi
     done < <(printf '%s' "$mappings" | tr ';' '\n')
 }
 
-cached_topic() {
-    local root="${UMP_TELEGRAM_TOPIC_CACHE:-$HOME/.pearz/telegram-topics}"
-    local safe
-    local lower
-    local candidate
+topic_from_tsv_file() {
+    local file="$1"
+    local chat
+    local name
     local id
-    safe="$(safe_name "$GAME")"
-    lower="$(printf '%s' "$safe" | tr '[:upper:]' '[:lower:]')"
 
-    if [ -f "$root" ]; then
-        id="$(grep -F "$GAME" "$root" 2>/dev/null \
-            | grep -Eo '[0-9]+' | tail -n 1 || true)"
-        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+    [ -f "$file" ] || return 0
+
+    while IFS=$'\t' read -r chat name id _rest; do
+        [ "$chat" = "$CHAT_ID" ] || continue
+        printf '%s' "$id" | grep -Eq '^[0-9]+$' || continue
+        if game_alias_matches "$name"; then
             printf '%s' "$id"
             return 0
         fi
+    done < "$file"
+}
+
+topic_from_kv_file() {
+    local file="$1"
+    local name
+    local chat
+    local id
+
+    [ -f "$file" ] || return 0
+
+    name="$(read_kv "$file" GAME)"
+    chat="$(read_kv "$file" CHAT_ID)"
+    id="$(read_kv "$file" TOPIC_ID)"
+
+    [ -n "$name" ] || return 0
+    [ -z "$chat" ] || [ "$chat" = "$CHAT_ID" ] || return 0
+    printf '%s' "$id" | grep -Eq '^[0-9]+$' || return 0
+
+    if game_alias_matches "$name"; then
+        printf '%s' "$id"
         return 0
     fi
+}
 
-    [ -d "$root" ] || return 0
+topic_from_directory() {
+    local dir="$1"
+    local candidate
+    local id
 
-    for candidate in \
-        "$root/$safe" \
-        "$root/$safe.txt" \
-        "$root/$safe.topic" \
-        "$root/$lower" \
-        "$root/$lower.txt" \
-        "$root/$lower.topic" \
-        "$root/${CHAT_ID}_${safe}" \
-        "$root/${CHAT_ID}_${safe}.txt"; do
+    [ -d "$dir" ] || return 0
+
+    while IFS= read -r candidate; do
         [ -f "$candidate" ] || continue
-        id="$(grep -Eo '[0-9]+' "$candidate" 2>/dev/null | tail -n 1 || true)"
+
+        id="$(topic_from_kv_file "$candidate")"
         if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
             printf '%s' "$id"
             return 0
         fi
-    done
+    done < <(find "$dir" -maxdepth 2 -type f 2>/dev/null | head -n 200)
+}
 
-    # Compatibility fallback for older cache layouts that stored the game
-    # name inside a file rather than in its filename.
-    while IFS= read -r candidate; do
-        [ -f "$candidate" ] || continue
-        if grep -Fq "$GAME" "$candidate" 2>/dev/null; then
-            id="$(grep -Eo '[0-9]+' "$candidate" 2>/dev/null | tail -n 1 || true)"
-            if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-                printf '%s' "$id"
-                return 0
-            fi
+cached_topic() {
+    local root
+    local id
+    root="$(topic_root)"
+
+    # Original reliable layout: one TSV file keyed by chat + game + topic.
+    if [ -f "$root" ]; then
+        id="$(topic_from_tsv_file "$root")"
+        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            echo "[PEARZ] Telegram topic cache hit (legacy state): $id" >&2
+            printf '%s' "$id"
+            return 0
         fi
-    done < <(find "$root" -maxdepth 2 -type f 2>/dev/null | head -n 100)
+    fi
+
+    # Directory layout used by some 1.0.10 builds.
+    if [ -d "$root" ]; then
+        id="$(topic_from_directory "$root")"
+        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            echo "[PEARZ] Telegram topic cache hit: $id" >&2
+            printf '%s' "$id"
+            return 0
+        fi
+    fi
+
+    # Regression compatibility: 1.0.10 wrote new topics to <state>.d when
+    # the old single-file state already existed, but its reader never looked
+    # there. Read it now so already-created topics stop multiplying.
+    if [ -d "${root}.d" ]; then
+        id="$(topic_from_directory "${root}.d")"
+        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+            echo "[PEARZ] Telegram topic cache hit (1.0.10 .d migration): $id" >&2
+            printf '%s' "$id"
+            return 0
+        fi
+    fi
 }
 
 store_topic() {
     local id="$1"
-    local root="${UMP_TELEGRAM_TOPIC_CACHE:-$HOME/.pearz/telegram-topics}"
+    local root
     local safe
+    local tmp
+    root="$(topic_root)"
     safe="$(safe_name "$GAME")"
 
-    if [ -e "$root" ] && [ ! -d "$root" ]; then
-        # Do not overwrite an old single-file cache format.
-        root="${root}.d"
-    fi
-
-    mkdir -p "$root"
-    cat > "$root/${safe}.topic" <<CACHE
+    # If the configured root is already a directory, preserve that layout.
+    if [ -d "$root" ]; then
+        mkdir -p "$root"
+        cat > "$root/${safe}.topic" <<CACHE
 GAME=$GAME
 CHAT_ID=$CHAT_ID
 TOPIC_ID=$id
 CACHE
+        return 0
+    fi
+
+    # Default / legacy layout: one TSV state file. This is shared by all
+    # branches and survives workspace cleanups.
+    mkdir -p "$(dirname "$root")"
+    touch "$root"
+    tmp="${root}.tmp.$$"
+
+    awk -F'\t' -v chat="$CHAT_ID" -v game="$GAME" \
+        '!($1 == chat && $2 == game)' \
+        "$root" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$root"
+
+    printf '%s\t%s\t%s\n' "$CHAT_ID" "$GAME" "$id" >> "$root"
+}
+
+TOPIC_LOCK_DIR=""
+acquire_topic_lock() {
+    local key
+    local lock_root
+    local attempts=0
+
+    key="$(canonical_name "${CHAT_ID}_${GAME}")"
+    [ -n "$key" ] || key="topic"
+    lock_root="${UMP_TELEGRAM_TOPIC_LOCK_ROOT:-$HOME/.pearz/telegram-topic-locks}"
+    mkdir -p "$lock_root"
+    TOPIC_LOCK_DIR="$lock_root/${key}.lock"
+
+    while ! mkdir "$TOPIC_LOCK_DIR" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 30 ]; then
+            echo "[PEARZ] Telegram topic lock timeout: $TOPIC_LOCK_DIR" >&2
+            TOPIC_LOCK_DIR=""
+            return 1
+        fi
+        sleep 1
+    done
+
+    return 0
+}
+
+release_topic_lock() {
+    if [ -n "$TOPIC_LOCK_DIR" ]; then
+        rmdir "$TOPIC_LOCK_DIR" 2>/dev/null || true
+        TOPIC_LOCK_DIR=""
+    fi
 }
 
 create_topic() {
     local response
     local id
+
+    # Do not call createForumTopic for normal non-forum groups.
+    if [ -n "$IS_FORUM" ] && ! truthy "$IS_FORUM"; then
+        echo "[PEARZ] Telegram chat is not a forum; topic creation skipped." >&2
+        return 0
+    fi
+
     response="$(curl -fsS --max-time 20 -X POST \
         --data-urlencode "chat_id=$CHAT_ID" \
         --data-urlencode "name=$GAME" \
@@ -271,8 +414,18 @@ fi
 if [ -z "$TOPIC_ID" ]; then
     TOPIC_ID="$(cached_topic)"
 fi
+
+# Only topic creation needs the cross-branch lock. Re-check the cache after
+# acquiring it: another Android/iOS branch may have created the topic while
+# this build was waiting.
 if [ -z "$TOPIC_ID" ] && truthy "${UMP_TELEGRAM_AUTO_TOPIC:-1}"; then
-    TOPIC_ID="$(create_topic)"
+    if acquire_topic_lock; then
+        TOPIC_ID="$(cached_topic)"
+        if [ -z "$TOPIC_ID" ]; then
+            TOPIC_ID="$(create_topic)"
+        fi
+        release_topic_lock
+    fi
 fi
 
 if [ -n "$TOPIC_ID" ]; then
