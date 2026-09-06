@@ -432,17 +432,94 @@ if [ -n "$TOPIC_ID" ]; then
     echo "[PEARZ] Telegram topic '$GAME': $TOPIC_ID"
 fi
 
-CURL_ARGS=(
-    -fsS
-    --max-time 30
-    -X POST
-    --data-urlencode "chat_id=$CHAT_ID"
-    --data-urlencode "text=$MESSAGE"
-    --data-urlencode "disable_web_page_preview=true"
-)
+json_top_field() {
+    local field="$1"
+    ruby -rjson -e '''
+        field = ARGV.fetch(0)
+        begin
+          json = JSON.parse(STDIN.read)
+          value = json[field]
+          if value == true
+            print "true"
+          elsif value == false
+            print "false"
+          elsif !value.nil?
+            print value.to_s
+          end
+        rescue StandardError
+        end
+    ''' "$field"
+}
 
-if [ -n "$TOPIC_ID" ]; then
-    CURL_ARGS+=(--data-urlencode "message_thread_id=$TOPIC_ID")
+tg_ok() {
+    [ "$(printf '%s' "$1" | json_top_field ok)" = "true" ]
+}
+
+tg_description() {
+    printf '%s' "$1" | json_top_field description
+}
+
+send_message() {
+    local thread_id="${1:-}"
+    local args=(
+        -sS
+        --max-time 30
+        -X POST
+        --data-urlencode "chat_id=$CHAT_ID"
+        --data-urlencode "text=$MESSAGE"
+        --data-urlencode "disable_web_page_preview=true"
+    )
+
+    if [ -n "$thread_id" ]; then
+        args+=(--data-urlencode "message_thread_id=$thread_id")
+    fi
+
+    # Do not use curl -f here. Telegram returns useful JSON on HTTP 400
+    # (closed/deleted/wrong topic). Jenkins intentionally treats Telegram
+    # as non-fatal, so swallowing that body used to make notifications
+    # disappear while the build still showed SUCCESS.
+    curl "${args[@]}" "$API/sendMessage" 2>/dev/null || true
+}
+
+RESPONSE="$(send_message "$TOPIC_ID")"
+
+if ! tg_ok "$RESPONSE"; then
+    DESCRIPTION="$(tg_description "$RESPONSE")"
+    echo "[PEARZ] Telegram send failed${TOPIC_ID:+ for topic $TOPIC_ID}: ${DESCRIPTION:-unknown error}" >&2
+
+    if [ -n "$TOPIC_ID" ]; then
+        case "$DESCRIPTION" in
+            *TOPIC_CLOSED*|*"topic was closed"*|*"topic closed"*)
+                echo "[PEARZ] Reopening existing Telegram topic $TOPIC_ID..." >&2
+                REOPEN_RESPONSE="$(curl -sS --max-time 20 -X POST                     --data-urlencode "chat_id=$CHAT_ID"                     --data-urlencode "message_thread_id=$TOPIC_ID"                     "$API/reopenForumTopic" 2>/dev/null || true)"
+
+                if tg_ok "$REOPEN_RESPONSE"; then
+                    RESPONSE="$(send_message "$TOPIC_ID")"
+                else
+                    echo "[PEARZ] Could not reopen topic $TOPIC_ID: $(tg_description "$REOPEN_RESPONSE")" >&2
+                fi
+                ;;
+        esac
+    fi
 fi
 
-curl "${CURL_ARGS[@]}" "$API/sendMessage" >/dev/null
+# Never auto-create another topic just because a remembered topic refused
+# a message. That is exactly how duplicate game topics were produced.
+# If the remembered topic is gone/invalid (or any topic retry still fails),
+# post once to the group/general topic so the build notification is not lost.
+if ! tg_ok "$RESPONSE" && [ -n "$TOPIC_ID" ]; then
+    DESCRIPTION="$(tg_description "$RESPONSE")"
+    echo "[PEARZ] Falling back to Telegram group/general topic; cached game topic is kept." >&2
+    echo "[PEARZ] Cached topic '$GAME' = $TOPIC_ID. Reason: ${DESCRIPTION:-unknown error}" >&2
+    RESPONSE="$(send_message "")"
+fi
+
+if tg_ok "$RESPONSE"; then
+    echo "[PEARZ] Telegram notification sent."
+else
+    DESCRIPTION="$(tg_description "$RESPONSE")"
+    echo "[PEARZ] ERROR: Telegram notification was not sent: ${DESCRIPTION:-no response from Telegram}" >&2
+    # Keep Telegram non-fatal for Jenkins, but make the failure unmistakable
+    # in the console instead of silently disappearing behind `|| true`.
+    exit 2
+fi

@@ -475,49 +475,53 @@ def safe_file_part(value):
 
 
 def find_companion_build_info(artifact, info):
-    # The Unity project's build-info plugin owns *_BUILD_INFO.txt. CI only
-    # discovers and uploads an existing file; it never creates, renames, or
-    # rewrites it. Unity/exports may leave stale BUILD_INFO files in a reused
-    # directory, so choose the newest matching file rather than failing on
-    # duplicates. Matching is case-insensitive for the suffix.
+    # The Unity project plugin owns BUILD_INFO. CI must only discover it.
+    # Android output directories are cleaned before each build, so an exact
+    # artifact-stem match is authoritative and safest.
     artifact = os.path.abspath(artifact)
     artifact_dir = os.path.dirname(artifact) or "."
+    artifact_stem = os.path.splitext(os.path.basename(artifact))[0]
 
-    if not os.path.isdir(artifact_dir):
+    if not artifact_stem or not os.path.isdir(artifact_dir):
         return ""
+
+    exact = os.path.join(artifact_dir, artifact_stem + "_BUILD_INFO.txt")
+    if os.path.isfile(exact):
+        return exact
+
+    product = (
+        info.get("PRODUCT_NAME_SAFE", "").strip()
+        or safe_file_part(info.get("PRODUCT_NAME", ""))
+        or safe_file_part(game_name(info))
+    )
+
+    patterns = []
+    if product:
+        patterns.extend([
+            os.path.join(artifact_dir, product + "*_BUILD_INFO.txt"),
+            os.path.join(artifact_dir, product + "*BUILD*INFO.txt"),
+        ])
 
     matches = []
-    try:
-        for root, _dirs, files in os.walk(artifact_dir):
-            for name in files:
-                lower = name.lower()
-                if lower.startswith("ump_") or not lower.endswith("_build_info.txt"):
-                    continue
-                candidate = os.path.join(root, name)
-                if os.path.isfile(candidate):
-                    try:
-                        mtime = os.path.getmtime(candidate)
-                    except OSError:
-                        continue
-                    matches.append((mtime, candidate))
-    except OSError:
-        return ""
+    for pattern in patterns:
+        for candidate in glob.glob(pattern):
+            if not os.path.isfile(candidate):
+                continue
+            if os.path.basename(candidate).startswith("ump_"):
+                continue
+            if candidate not in matches:
+                matches.append(candidate)
 
-    if not matches:
-        return ""
-
-    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = matches[0][1]
+    if len(matches) == 1:
+        return matches[0]
 
     if len(matches) > 1:
-        log(
-            "Multiple plugin BUILD_INFO files found under %s; selecting newest: %s"
-            % (artifact_dir, selected)
+        raise RuntimeError(
+            "Multiple plugin BUILD_INFO files match artifact %s: %s"
+            % (artifact, ", ".join(sorted(matches)))
         )
-        for _mtime, candidate in matches:
-            log("  BUILD_INFO candidate: " + candidate)
 
-    return selected
+    return ""
 
 
 def upload(access_token, folder_id, file_path, remote_name=None, url_file=None):
@@ -586,7 +590,7 @@ def main():
     )
 
     if build_info_only:
-        if not os.path.basename(artifact).lower().endswith("_build_info.txt"):
+        if not os.path.basename(artifact).endswith("_BUILD_INFO.txt"):
             raise RuntimeError(
                 "UMP_DRIVE_BUILD_INFO_ONLY requires a *_BUILD_INFO.txt file: "
                 + artifact
