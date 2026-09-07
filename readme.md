@@ -7,7 +7,7 @@ Pearz Unity Mobile Pipeline for Jenkins Android/iOS builds, TestFlight, Google D
 Install with Unity Package Manager using **Add package from Git URL**:
 
 ```text
-https://github.com/dat140196/pearz-ci.git#1.0.10
+https://github.com/dat140196/pearz-ci.git#1.0.12
 ```
 
 Pin the package version/tag in `Packages/manifest.json` so Unity does not have to follow a moving Git revision on every build:
@@ -15,7 +15,7 @@ Pin the package version/tag in `Packages/manifest.json` so Unity does not have t
 ```json
 {
   "dependencies": {
-    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.10"
+    "com.ump.pearz-build-pipeline": "https://github.com/dat140196/pearz-ci.git#1.0.12"
   }
 }
 ```
@@ -338,10 +338,10 @@ When upgrading UMP:
 ## Current version
 
 ```text
-UMP 1.0.10
+UMP 1.0.12
 ```
 
-The package version is `1.0.10`. Tag the release as `1.0.10` and point Unity projects to `#1.0.10`.
+The package version is `1.0.12`. Tag the release as `1.0.12` and point Unity projects to `#1.0.12`.
 
 
 ## BUILD_INFO source rule (1.0.10)
@@ -372,4 +372,4 @@ Builds/Android/MeowTrail-v1.0.0_BUILD_INFO.txt
 
 Game `*_BUILD_INFO.txt` files are owned entirely by the Unity project's own build-info plugin. Pearz CI never creates, copies, deletes, edits, or overwrites those files. `Builds/ump_build_info.txt` is Jenkins-private metadata only.
 
-Android and iOS Drive upload discover exactly one existing plugin BUILD_INFO file in the relevant artifact/export directory. The filename prefix is not derived by CI because Unity can generate different product prefixes per platform; any file ending in `_build_info.txt` is accepted case-insensitively. The plugin file is uploaded byte-for-byte with its original filename.
+Android Drive upload discovers the plugin file beside the APK/AAB, preferring the exact artifact stem (`<artifact-stem>_BUILD_INFO.txt`). iOS Drive upload reads the plugin file from `Builds/iOS/` beside the game Xcode export directory. The plugin file is uploaded byte-for-byte with its original filename.

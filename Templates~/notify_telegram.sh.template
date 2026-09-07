@@ -434,7 +434,7 @@ fi
 
 json_top_field() {
     local field="$1"
-    ruby -rjson -e '''
+    ruby -rjson -e '
         field = ARGV.fetch(0)
         begin
           json = JSON.parse(STDIN.read)
@@ -448,7 +448,7 @@ json_top_field() {
           end
         rescue StandardError
         end
-    ''' "$field"
+    ' "$field"
 }
 
 tg_ok() {
@@ -491,7 +491,10 @@ if ! tg_ok "$RESPONSE"; then
         case "$DESCRIPTION" in
             *TOPIC_CLOSED*|*"topic was closed"*|*"topic closed"*)
                 echo "[PEARZ] Reopening existing Telegram topic $TOPIC_ID..." >&2
-                REOPEN_RESPONSE="$(curl -sS --max-time 20 -X POST                     --data-urlencode "chat_id=$CHAT_ID"                     --data-urlencode "message_thread_id=$TOPIC_ID"                     "$API/reopenForumTopic" 2>/dev/null || true)"
+                REOPEN_RESPONSE="$(curl -sS --max-time 20 -X POST \
+                    --data-urlencode "chat_id=$CHAT_ID" \
+                    --data-urlencode "message_thread_id=$TOPIC_ID" \
+                    "$API/reopenForumTopic" 2>/dev/null || true)"
 
                 if tg_ok "$REOPEN_RESPONSE"; then
                     RESPONSE="$(send_message "$TOPIC_ID")"
