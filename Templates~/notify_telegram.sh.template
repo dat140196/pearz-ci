@@ -205,7 +205,7 @@ topic_root() {
     printf '%s' "${UMP_TELEGRAM_TOPIC_CACHE:-${UMP_TELEGRAM_TOPIC_STATE:-$HOME/.pearz/telegram-topics}}"
 }
 
-mapped_topic() {
+mapped_topic_candidates() {
     local mappings="${UMP_TELEGRAM_TOPICS:-}"
     local pair
     local name
@@ -218,13 +218,12 @@ mapped_topic() {
         id="${pair#*=}"
         id="$(printf '%s' "$id" | tr -d '[:space:]')"
         if game_alias_matches "$name" && printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-            printf '%s' "$id"
-            return 0
+            printf '%s\n' "$id"
         fi
     done < <(printf '%s' "$mappings" | tr ';' '\n')
 }
 
-topic_from_tsv_file() {
+topic_ids_from_tsv_file() {
     local file="$1"
     local chat
     local name
@@ -236,13 +235,12 @@ topic_from_tsv_file() {
         [ "$chat" = "$CHAT_ID" ] || continue
         printf '%s' "$id" | grep -Eq '^[0-9]+$' || continue
         if game_alias_matches "$name"; then
-            printf '%s' "$id"
-            return 0
+            printf '%s\n' "$id"
         fi
     done < "$file"
 }
 
-topic_from_kv_file() {
+topic_id_from_kv_file() {
     local file="$1"
     local name
     local chat
@@ -259,12 +257,11 @@ topic_from_kv_file() {
     printf '%s' "$id" | grep -Eq '^[0-9]+$' || return 0
 
     if game_alias_matches "$name"; then
-        printf '%s' "$id"
-        return 0
+        printf '%s\n' "$id"
     fi
 }
 
-topic_from_directory() {
+topic_ids_from_directory() {
     local dir="$1"
     local candidate
     local id
@@ -273,51 +270,71 @@ topic_from_directory() {
 
     while IFS= read -r candidate; do
         [ -f "$candidate" ] || continue
-
-        id="$(topic_from_kv_file "$candidate")"
+        id="$(topic_id_from_kv_file "$candidate")"
         if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-            printf '%s' "$id"
-            return 0
+            printf '%s\n' "$id"
         fi
     done < <(find "$dir" -maxdepth 2 -type f 2>/dev/null | head -n 200)
 }
 
-cached_topic() {
+topic_history_file() {
     local root
-    local id
     root="$(topic_root)"
-
-    # Original reliable layout: one TSV file keyed by chat + game + topic.
-    if [ -f "$root" ]; then
-        id="$(topic_from_tsv_file "$root")"
-        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-            echo "[PEARZ] Telegram topic cache hit (legacy state): $id" >&2
-            printf '%s' "$id"
-            return 0
-        fi
-    fi
-
-    # Directory layout used by some 1.0.10 builds.
     if [ -d "$root" ]; then
-        id="$(topic_from_directory "$root")"
-        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-            echo "[PEARZ] Telegram topic cache hit: $id" >&2
-            printf '%s' "$id"
-            return 0
-        fi
+        printf '%s/history.tsv' "$root"
+    else
+        printf '%s.history' "$root"
+    fi
+}
+
+known_topic_candidates() {
+    local root
+    local history
+    root="$(topic_root)"
+    history="$(topic_history_file)"
+
+    # Explicit Jenkins mapping is authoritative and tried first.
+    if [ -n "${UMP_TELEGRAM_TOPIC_ID:-}" ] && \
+       printf '%s' "$UMP_TELEGRAM_TOPIC_ID" | grep -Eq '^[0-9]+$'; then
+        printf '%s\n' "$UMP_TELEGRAM_TOPIC_ID"
     fi
 
-    # Regression compatibility: 1.0.10 wrote new topics to <state>.d when
-    # the old single-file state already existed, but its reader never looked
-    # there. Read it now so already-created topics stop multiplying.
-    if [ -d "${root}.d" ]; then
-        id="$(topic_from_directory "${root}.d")"
-        if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-            echo "[PEARZ] Telegram topic cache hit (1.0.10 .d migration): $id" >&2
-            printf '%s' "$id"
-            return 0
-        fi
+    mapped_topic_candidates
+
+    # Current/legacy cache layouts.
+    if [ -f "$root" ]; then
+        topic_ids_from_tsv_file "$root"
     fi
+    if [ -d "$root" ]; then
+        topic_ids_from_directory "$root"
+    fi
+    if [ -d "${root}.d" ]; then
+        topic_ids_from_directory "${root}.d"
+    fi
+    topic_ids_from_tsv_file "$history"
+}
+
+remember_topic_history() {
+    local id="$1"
+    local history
+    local tmp
+
+    history="$(topic_history_file)"
+    mkdir -p "$(dirname "$history")"
+    touch "$history"
+
+    # Keep all historical topic ids for this game. A deleted latest topic may
+    # have an older duplicate that is still active and should be recovered.
+    if awk -F'\t' -v chat="$CHAT_ID" -v id="$id" \
+        '$1 == chat && $3 == id { found=1 } END { exit(found ? 0 : 1) }' \
+        "$history"; then
+        return 0
+    fi
+
+    tmp="${history}.tmp.$$"
+    cat "$history" > "$tmp"
+    printf '%s\t%s\t%s\n' "$CHAT_ID" "$GAME" "$id" >> "$tmp"
+    mv "$tmp" "$history"
 }
 
 store_topic() {
@@ -327,6 +344,8 @@ store_topic() {
     local tmp
     root="$(topic_root)"
     safe="$(safe_name "$GAME")"
+
+    remember_topic_history "$id"
 
     # If the configured root is already a directory, preserve that layout.
     if [ -d "$root" ]; then
@@ -339,8 +358,7 @@ CACHE
         return 0
     fi
 
-    # Default / legacy layout: one TSV state file. This is shared by all
-    # branches and survives workspace cleanups.
+    # Default / legacy layout: one current TSV mapping per game.
     mkdir -p "$(dirname "$root")"
     touch "$root"
     tmp="${root}.tmp.$$"
@@ -389,13 +407,11 @@ create_topic() {
     local response
     local id
 
-    # Do not call createForumTopic for normal non-forum groups.
     if [ -n "$IS_FORUM" ] && ! truthy "$IS_FORUM"; then
-        echo "[PEARZ] Telegram chat is not a forum; topic creation skipped." >&2
         return 0
     fi
 
-    response="$(curl -fsS --max-time 20 -X POST \
+    response="$(curl -sS --max-time 20 -X POST \
         --data-urlencode "chat_id=$CHAT_ID" \
         --data-urlencode "name=$GAME" \
         "$API/createForumTopic" 2>/dev/null || true)"
@@ -403,34 +419,9 @@ create_topic() {
     if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
         store_topic "$id"
         echo "[PEARZ] Telegram topic '$GAME' created: $id" >&2
-        printf '%s' "$id"
+        printf '%s\n' "$id"
     fi
 }
-
-TOPIC_ID="${UMP_TELEGRAM_TOPIC_ID:-}"
-if [ -z "$TOPIC_ID" ]; then
-    TOPIC_ID="$(mapped_topic)"
-fi
-if [ -z "$TOPIC_ID" ]; then
-    TOPIC_ID="$(cached_topic)"
-fi
-
-# Only topic creation needs the cross-branch lock. Re-check the cache after
-# acquiring it: another Android/iOS branch may have created the topic while
-# this build was waiting.
-if [ -z "$TOPIC_ID" ] && truthy "${UMP_TELEGRAM_AUTO_TOPIC:-1}"; then
-    if acquire_topic_lock; then
-        TOPIC_ID="$(cached_topic)"
-        if [ -z "$TOPIC_ID" ]; then
-            TOPIC_ID="$(create_topic)"
-        fi
-        release_topic_lock
-    fi
-fi
-
-if [ -n "$TOPIC_ID" ]; then
-    echo "[PEARZ] Telegram topic '$GAME': $TOPIC_ID"
-fi
 
 json_top_field() {
     local field="$1"
@@ -459,6 +450,76 @@ tg_description() {
     printf '%s' "$1" | json_top_field description
 }
 
+# Telegram Bot API has no method that lists/searches every forum topic.
+# getUpdates can still reveal topic service messages that are currently in
+# the bot update queue. We use them as an additional recovery source without
+# advancing offset, so CI does not intentionally consume/confirm updates.
+discover_topic_candidates_from_updates() {
+    local updates
+    local response_ok
+
+    updates="$(curl -sS --max-time 20 --get \
+        --data-urlencode "limit=100" \
+        --data-urlencode "timeout=0" \
+        "$API/getUpdates" 2>/dev/null || true)"
+
+    response_ok="$(printf '%s' "$updates" | json_top_field ok)"
+    if [ "$response_ok" != "true" ]; then
+        local reason
+        reason="$(printf '%s' "$updates" | json_top_field description)"
+        [ -z "$reason" ] || echo "[PEARZ] Telegram topic discovery unavailable: $reason" >&2
+        return 0
+    fi
+
+    printf '%s' "$updates" | ruby -rjson -e '
+        chat_id = ARGV.shift.to_s
+        aliases = ARGV.map { |s| s.to_s.downcase.gsub(/[^[:alnum:]]/, "") }.reject(&:empty?).uniq
+
+        begin
+          json = JSON.parse(STDIN.read)
+        rescue StandardError
+          exit 0
+        end
+
+        state = {}
+        Array(json["result"]).each do |update|
+          msg = update["message"] || update["channel_post"] ||
+                update["edited_message"] || update["edited_channel_post"]
+          next unless msg.is_a?(Hash)
+          next unless msg.dig("chat", "id").to_s == chat_id
+
+          tid = msg["message_thread_id"]
+          created = msg["forum_topic_created"]
+          edited = msg["forum_topic_edited"]
+          closed = msg.key?("forum_topic_closed")
+          reopened = msg.key?("forum_topic_reopened")
+
+          # For the topic-creation service message, message_id is the topic
+          # root id and is a safe fallback if message_thread_id is absent.
+          tid ||= msg["message_id"] if created
+          next unless tid
+
+          item = (state[tid.to_i] ||= { name: nil, closed: false })
+          if created.is_a?(Hash)
+            item[:name] = created["name"] if created["name"]
+            item[:closed] = false
+          end
+          if edited.is_a?(Hash) && edited["name"]
+            item[:name] = edited["name"]
+          end
+          item[:closed] = true if closed
+          item[:closed] = false if reopened
+        end
+
+        canonical = ->(s) { s.to_s.downcase.gsub(/[^[:alnum:]]/, "") }
+        state.each do |id, item|
+          next if item[:closed]
+          next unless aliases.include?(canonical.call(item[:name]))
+          puts id
+        end
+    ' -- "$CHAT_ID" "$GAME" "$PRODUCT_NAME" "$JOB_GAME" "${UMP_GAME_NAME:-}"
+}
+
 send_message() {
     local thread_id="${1:-}"
     local args=(
@@ -474,55 +535,100 @@ send_message() {
         args+=(--data-urlencode "message_thread_id=$thread_id")
     fi
 
-    # Do not use curl -f here. Telegram returns useful JSON on HTTP 400
-    # (closed/deleted/wrong topic). Jenkins intentionally treats Telegram
-    # as non-fatal, so swallowing that body used to make notifications
-    # disappear while the build still showed SUCCESS.
     curl "${args[@]}" "$API/sendMessage" 2>/dev/null || true
 }
 
-RESPONSE="$(send_message "$TOPIC_ID")"
+try_topic_candidates() {
+    local candidates="$1"
+    local id
+    local response
+    local description
 
-if ! tg_ok "$RESPONSE"; then
-    DESCRIPTION="$(tg_description "$RESPONSE")"
-    echo "[PEARZ] Telegram send failed${TOPIC_ID:+ for topic $TOPIC_ID}: ${DESCRIPTION:-unknown error}" >&2
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        printf '%s' "$id" | grep -Eq '^[0-9]+$' || continue
 
-    if [ -n "$TOPIC_ID" ]; then
-        case "$DESCRIPTION" in
-            *TOPIC_CLOSED*|*"topic was closed"*|*"topic closed"*)
-                echo "[PEARZ] Reopening existing Telegram topic $TOPIC_ID..." >&2
-                REOPEN_RESPONSE="$(curl -sS --max-time 20 -X POST \
-                    --data-urlencode "chat_id=$CHAT_ID" \
-                    --data-urlencode "message_thread_id=$TOPIC_ID" \
-                    "$API/reopenForumTopic" 2>/dev/null || true)"
+        echo "[PEARZ] Trying Telegram topic '$GAME': $id"
+        response="$(send_message "$id")"
 
-                if tg_ok "$REOPEN_RESPONSE"; then
-                    RESPONSE="$(send_message "$TOPIC_ID")"
-                else
-                    echo "[PEARZ] Could not reopen topic $TOPIC_ID: $(tg_description "$REOPEN_RESPONSE")" >&2
-                fi
-                ;;
-        esac
+        if tg_ok "$response"; then
+            TOPIC_ID="$id"
+            store_topic "$id"
+            echo "[PEARZ] Telegram topic '$GAME' active: $id"
+            echo "[PEARZ] Telegram notification sent."
+            return 0
+        fi
+
+        description="$(tg_description "$response")"
+        echo "[PEARZ] Telegram topic $id unavailable: ${description:-unknown error}" >&2
+    done < <(printf '%s\n' "$candidates" | sed '/^$/d' | awk '!seen[$0]++')
+
+    return 1
+}
+
+# Non-forum chats have no topic to target. For forum groups, however, never
+# fall back to General: build notifications must stay inside the game topic.
+if [ -n "$IS_FORUM" ] && ! truthy "$IS_FORUM"; then
+    RESPONSE="$(send_message "")"
+    if tg_ok "$RESPONSE"; then
+        echo "[PEARZ] Telegram notification sent (non-forum chat)."
+        exit 0
+    fi
+    echo "[PEARZ] ERROR: Telegram notification was not sent: $(tg_description "$RESPONSE")" >&2
+    exit 2
+fi
+
+KNOWN_CANDIDATES="$(known_topic_candidates | sed '/^$/d' | awk '!seen[$0]++')"
+DISCOVERED_CANDIDATES="$(discover_topic_candidates_from_updates | sed '/^$/d' | awk '!seen[$0]++')"
+ALL_CANDIDATES="$(printf '%s\n%s\n' "$KNOWN_CANDIDATES" "$DISCOVERED_CANDIDATES" \
+    | sed '/^$/d' | awk '!seen[$0]++')"
+
+if [ -n "$DISCOVERED_CANDIDATES" ]; then
+    echo "[PEARZ] Same-name Telegram topic candidates discovered from updates:" >&2
+    printf '%s\n' "$DISCOVERED_CANDIDATES" | sed 's/^/[PEARZ]   topic /' >&2
+fi
+
+if [ -n "$ALL_CANDIDATES" ] && try_topic_candidates "$ALL_CANDIDATES"; then
+    exit 0
+fi
+
+# If there was any known/discovered same-name topic, this is recovery mode.
+# Do NOT reopen, do NOT send General, and do NOT create another duplicate.
+if [ -n "$ALL_CANDIDATES" ]; then
+    echo "[PEARZ] ERROR: No active Telegram topic named '$GAME' was reachable." >&2
+    echo "[PEARZ] General fallback is disabled; no duplicate topic was created." >&2
+    echo "[PEARZ] If the bot update queue no longer contains the active topic," >&2
+    echo "[PEARZ] set UMP_TELEGRAM_TOPICS=\"$GAME=<message_thread_id>\" once." >&2
+    exit 2
+fi
+
+# Truly first-time game: no remembered or discoverable same-name topic exists.
+# Preserve automatic topic creation for this one case only.
+if truthy "${UMP_TELEGRAM_AUTO_TOPIC:-1}"; then
+    if acquire_topic_lock; then
+        # Another branch may have recorded/discovered the topic while waiting.
+        KNOWN_CANDIDATES="$(known_topic_candidates | sed '/^$/d' | awk '!seen[$0]++')"
+        DISCOVERED_CANDIDATES="$(discover_topic_candidates_from_updates | sed '/^$/d' | awk '!seen[$0]++')"
+        ALL_CANDIDATES="$(printf '%s\n%s\n' "$KNOWN_CANDIDATES" "$DISCOVERED_CANDIDATES" \
+            | sed '/^$/d' | awk '!seen[$0]++')"
+
+        if [ -n "$ALL_CANDIDATES" ]; then
+            release_topic_lock
+            if try_topic_candidates "$ALL_CANDIDATES"; then
+                exit 0
+            fi
+            echo "[PEARZ] ERROR: Same-name Telegram topic appeared but none is active." >&2
+            exit 2
+        fi
+
+        CREATED_TOPIC="$(create_topic)"
+        release_topic_lock
+
+        if [ -n "$CREATED_TOPIC" ] && try_topic_candidates "$CREATED_TOPIC"; then
+            exit 0
+        fi
     fi
 fi
 
-# Never auto-create another topic just because a remembered topic refused
-# a message. That is exactly how duplicate game topics were produced.
-# If the remembered topic is gone/invalid (or any topic retry still fails),
-# post once to the group/general topic so the build notification is not lost.
-if ! tg_ok "$RESPONSE" && [ -n "$TOPIC_ID" ]; then
-    DESCRIPTION="$(tg_description "$RESPONSE")"
-    echo "[PEARZ] Falling back to Telegram group/general topic; cached game topic is kept." >&2
-    echo "[PEARZ] Cached topic '$GAME' = $TOPIC_ID. Reason: ${DESCRIPTION:-unknown error}" >&2
-    RESPONSE="$(send_message "")"
-fi
-
-if tg_ok "$RESPONSE"; then
-    echo "[PEARZ] Telegram notification sent."
-else
-    DESCRIPTION="$(tg_description "$RESPONSE")"
-    echo "[PEARZ] ERROR: Telegram notification was not sent: ${DESCRIPTION:-no response from Telegram}" >&2
-    # Keep Telegram non-fatal for Jenkins, but make the failure unmistakable
-    # in the console instead of silently disappearing behind `|| true`.
-    exit 2
-fi
+echo "[PEARZ] ERROR: Telegram topic '$GAME' was not found and notification was not sent." >&2
+exit 2

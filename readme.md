@@ -373,3 +373,10 @@ Builds/Android/MeowTrail-v1.0.0_BUILD_INFO.txt
 Game `*_BUILD_INFO.txt` files are owned entirely by the Unity project's own build-info plugin. Pearz CI never creates, copies, deletes, edits, or overwrites those files. `Builds/ump_build_info.txt` is Jenkins-private metadata only.
 
 Android Drive upload discovers the plugin file beside the APK/AAB, preferring the exact artifact stem (`<artifact-stem>_BUILD_INFO.txt`). iOS Drive upload reads the plugin file from `Builds/iOS/` beside the game Xcode export directory. The plugin file is uploaded byte-for-byte with its original filename.
+
+
+## Telegram same-name topic recovery (1.0.14)
+
+For forum groups, Jenkins never falls back to the General topic. If the remembered game topic is deleted, closed, or otherwise unreachable, the notifier searches every same-game topic id known from Jenkins topic state/history plus matching `forum_topic_created` / `forum_topic_edited` service messages still visible through Telegram Bot API `getUpdates`. It tries those candidate thread ids until one accepts the build notification.
+
+If no active same-name topic can be discovered, the notification is not sent to General and Jenkins does not create another duplicate topic. Because Telegram Bot API does not expose a method to list/search all forum topics, a manually created topic that is no longer present in the bot update queue may need a one-time mapping such as `UMP_TELEGRAM_TOPICS="Meow Trail=187"`. After a successful send, Jenkins stores the working topic id again.
